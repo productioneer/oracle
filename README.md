@@ -78,3 +78,5 @@ npm run dev -- run --prompt "Hello" --profile-name "Work"
 ## Testing
 
 `npm test` runs the mock server once (smoke test). For real UI validation, run against ChatGPT directly.
+
+See `docs/TESTING.md` for selector sync and long-run validation.
