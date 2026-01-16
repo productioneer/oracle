@@ -1,0 +1,27 @@
+{
+  "name": "oracle",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser-based tool for AI agents to query GPT via ChatGPT web interface.",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "bin": {
+    "oracle": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "worker": "tsx src/worker.ts",
+    "lint": "echo 'no lint configured'",
+    "test": "node scripts/mock-server.js --once"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "puppeteer": "^23.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
