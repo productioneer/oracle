@@ -8,6 +8,12 @@
 node dist/cli.js run --prompt "Hello" --profile-name "<Profile>" --user-data-dir "$HOME/Library/Application Support/Google/Chrome"
 ```
 
+Note: On some machines the system Chrome profile will not start a debug port. If you see `Chrome debug endpoint failed to start`, use the Oracle profile instead:
+
+```
+node dist/cli.js run --prompt "Hello" --user-data-dir "$HOME/.oracle/chrome"
+```
+
 2. If `needs_user: login`, run:
 
 ```

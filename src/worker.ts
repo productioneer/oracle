@@ -13,6 +13,7 @@ import {
   waitForCompletion,
   waitForPromptInput,
 } from './browser/chatgpt.js';
+import { chromeUserDataDirMac } from './browser/profiles.js';
 import { saveResultJson, saveResultMarkdown, saveRunConfig, saveStatus } from './run/state.js';
 import type { RunConfig, StatusPayload } from './run/types.js';
 import { readJson, pathExists } from './utils/fs.js';
@@ -181,6 +182,15 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
       await finalizeCanceled(config, logger, 'Canceled by user');
       return 'completed';
     }
+    if (shouldRequestProfileAssistance(error, config)) {
+      await writeNeedsUser(
+        config,
+        'profile',
+        'System Chrome profile failed to start debug port. Use --user-data-dir ~/.oracle/chrome or pre-launch Chrome with --remote-debugging-port, then resume.',
+        'launch',
+      );
+      return 'needs_user';
+    }
     logger(`[worker] runAttempt error: ${String(error)}`);
     try {
       await attemptRecovery(config, browser, page, logger, runDir);
@@ -273,11 +283,12 @@ async function writeNeedsUser(
   config: RunConfig,
   type: NonNullable<StatusPayload['needs']>['type'],
   details: string,
+  stage: StatusPayload['stage'] = 'login',
 ): Promise<void> {
   await saveStatus(config.statusPath, {
     runId: config.runId,
     state: 'needs_user',
-    stage: 'login',
+    stage,
     message: details,
     updatedAt: nowIso(),
     attempt: config.attempt,
@@ -548,6 +559,19 @@ function parseArgs(argv: string[]): { runDir?: string } {
     }
   }
   return args;
+}
+
+function shouldRequestProfileAssistance(error: unknown, config: RunConfig): boolean {
+  if (config.browser !== 'chrome') return false;
+  if (!isSystemChromeProfile(config.profile.userDataDir)) return false;
+  if (!(error instanceof Error)) return false;
+  return /Chrome debug endpoint failed to start/i.test(error.message);
+}
+
+function isSystemChromeProfile(userDataDir: string): boolean {
+  const normalized = path.resolve(userDataDir);
+  const systemDir = path.resolve(chromeUserDataDirMac());
+  return normalized === systemDir;
 }
 
 main().catch((error) => {

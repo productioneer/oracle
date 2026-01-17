@@ -67,7 +67,7 @@ export type StatusPayload = {
   attempt: number;
   conversationUrl?: string;
   needs?: {
-    type: 'login' | 'cloudflare' | 'kill_chrome' | 'unknown';
+    type: 'login' | 'cloudflare' | 'kill_chrome' | 'profile' | 'unknown';
     details?: string;
   };
 };

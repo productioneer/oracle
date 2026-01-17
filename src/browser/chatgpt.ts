@@ -257,7 +257,7 @@ export async function getLastAssistantMessage(
     for (const candidate of candidates) {
       const text = extractMarkdown(candidate);
       if (!isSubstantiveText(text)) continue;
-      const role = resolveRole(candidate);
+      const role = resolveRole(candidate, text);
       if (role && role.toLowerCase().includes('assistant')) {
         assistantMessages.push({ text, role });
         continue;
@@ -313,7 +313,9 @@ export async function getLastAssistantMessage(
       return results;
     }
 
-    function resolveRole(el: Element): string | null {
+    function resolveRole(el: Element, text: string): string | null {
+      if (/^chatgpt said:/i.test(text.trim())) return 'assistant';
+      if (/^you said:/i.test(text.trim())) return 'user';
       const explicit = el.getAttribute('data-message-author-role') || el.getAttribute('data-author') || el.getAttribute('data-role');
       if (explicit) return explicit;
       let node: Element | null = el;
@@ -342,12 +344,12 @@ export async function getLastAssistantMessage(
     function extractFromContainerText(promptNeedle: string, text: string): string {
       if (!text) return '';
       const normalized = text.replace(/\r/g, '').trim();
-      if (!promptNeedle) return normalized;
+      if (!promptNeedle) return stripUiLabels(normalized);
       const idx = normalized.lastIndexOf(promptNeedle);
       if (idx === -1) return '';
       let after = normalized.slice(idx + promptNeedle.length).trim();
       after = after.replace(/^(answer now|thinking|stop generating|continue generating)\b[^\n]*\n?/i, '').trim();
-      return after;
+      return stripUiLabels(after);
     }
 
     function getMainText(): string {
@@ -416,8 +418,31 @@ export async function getLastAssistantMessage(
       clone.querySelectorAll('li').forEach((li) => {
         li.replaceWith(`- ${li.innerText}\n`);
       });
-      const text = clone.textContent ?? '';
-      return text.replace(/\n{3,}/g, '\n\n').trim();
+      const rawText = clone.textContent ?? '';
+      const cleaned = rawText.replace(/\n{3,}/g, '\n\n').trim();
+      return stripUiLabels(cleaned);
+    }
+
+    function stripUiLabels(text: string): string {
+      const lines = text.split(/\r?\n/);
+      const filtered: string[] = [];
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          if (filtered.length) filtered.push('');
+          continue;
+        }
+        if (/^chatgpt said:/i.test(trimmed)) continue;
+        if (/^you said:/i.test(trimmed)) continue;
+        if (/^thought for\\s+\\d+\\s+seconds/i.test(trimmed)) continue;
+        if (/^sources$/i.test(trimmed)) continue;
+        if (/^extended thinking$/i.test(trimmed)) continue;
+        if (/chatgpt can make mistakes/i.test(trimmed)) continue;
+        if (/cookie preferences/i.test(trimmed)) continue;
+        if (/check important info/i.test(trimmed)) continue;
+        filtered.push(line);
+      }
+      return filtered.join('\n').replace(/\n{3,}/g, '\n\n').trim();
     }
   }, prompt);
   if (domResult.text) return domResult;
