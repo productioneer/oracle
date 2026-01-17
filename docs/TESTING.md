@@ -5,14 +5,10 @@
 1. Run a prompt against the real interface:
 
 ```
-node dist/cli.js run --prompt "Hello" --profile-name "<Profile>" --user-data-dir "$HOME/Library/Application Support/Google/Chrome"
+node dist/cli.js run --prompt "Hello"
 ```
 
-Note: On some machines the system Chrome profile will not start a debug port. If you see `Chrome debug endpoint failed to start`, use the Oracle profile instead:
-
-```
-node dist/cli.js run --prompt "Hello" --user-data-dir "$HOME/.oracle/chrome"
-```
+Note: Chrome always uses the dedicated Oracle profile at `~/.oracle/chrome`. If you're not logged in yet, use `oracle open`.
 
 2. If `needs_user: login`, run:
 
@@ -46,6 +42,20 @@ Use the mock `stall=1` query to simulate a streaming stall and confirm recovery:
 
 ```
 node dist/cli.js run --prompt "stall" --base-url http://127.0.0.1:7777/?stall=1 --stall-ms 30000 --timeout-ms 120000
+```
+
+For a 2h+ streaming run, use `durationMs` on the mock server and raise the timeout:
+
+```
+node dist/cli.js run --prompt "long" --base-url http://127.0.0.1:7777/?durationMs=7200000 --timeout-ms 7800000
+```
+
+## Structured Output Extraction
+
+Automated extraction tests validate JSON/XML/exact-string outputs using headless Chromium:
+
+```
+npm test
 ```
 
 ## Debug Capture

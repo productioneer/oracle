@@ -6,7 +6,7 @@ import type { Browser } from 'puppeteer';
 import puppeteer from 'puppeteer';
 import { sleep } from '../utils/time.js';
 import type { Logger } from '../utils/log.js';
-import { chromeUserDataDirMac } from './profiles.js';
+import { oracleChromeDataDir } from './profiles.js';
 
 export type ChromeLaunchOptions = {
   userDataDir?: string;
@@ -25,7 +25,7 @@ export type ChromeConnection = {
 
 export async function launchChrome(options: ChromeLaunchOptions): Promise<ChromeConnection> {
   const appName = options.appName ?? 'Google Chrome';
-  const userDataDir = options.userDataDir ?? chromeUserDataDirMac();
+  const userDataDir = options.userDataDir ?? oracleChromeDataDir();
   await fs.promises.mkdir(userDataDir, { recursive: true });
   const existingPort = await findExistingChromePort(userDataDir);
   if (existingPort) {

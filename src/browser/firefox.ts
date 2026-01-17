@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 import puppeteer from 'puppeteer';
 import type { Browser } from 'puppeteer';
@@ -16,7 +17,9 @@ export type FirefoxConnection = {
 export async function launchFirefox(options: FirefoxLaunchOptions): Promise<FirefoxConnection> {
   const args: string[] = [];
   if (options.profilePath) {
-    args.push('-profile', path.resolve(options.profilePath));
+    const resolvedProfile = path.resolve(options.profilePath);
+    await fs.promises.mkdir(resolvedProfile, { recursive: true });
+    args.push('-profile', resolvedProfile);
   }
   if (!options.allowVisible) {
     // Best-effort: keep window in background; Firefox may still focus.

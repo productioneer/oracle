@@ -2,27 +2,14 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-export type ChromeProfileInfo = { dir: string; name: string };
 export type FirefoxProfileInfo = { dir: string; name: string; path: string };
-
-export function chromeUserDataDirMac(): string {
-  return path.join(os.homedir(), 'Library/Application Support/Google/Chrome');
-}
 
 export function oracleChromeDataDir(): string {
   return path.join(os.homedir(), '.oracle', 'chrome');
 }
 
-export function listChromeProfilesMac(userDataDir: string = chromeUserDataDirMac()): ChromeProfileInfo[] {
-  const localStatePath = path.join(userDataDir, 'Local State');
-  const raw = fs.readFileSync(localStatePath, 'utf8');
-  const json = JSON.parse(raw);
-  const info = json.profile?.info_cache ?? {};
-  return Object.entries(info).map(([dir, meta]) => {
-    const metaName = (meta as { name?: string }).name;
-    const name = typeof metaName === 'string' ? metaName : dir;
-    return { dir, name };
-  });
+export function oracleFirefoxDataDir(): string {
+  return path.join(os.homedir(), '.oracle', 'firefox');
 }
 
 export function firefoxProfilesMac(): FirefoxProfileInfo[] {

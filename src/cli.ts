@@ -4,10 +4,11 @@ import path from 'path';
 import { Command } from 'commander';
 import { defaultRunsRoot, runDir, statusPath, resultPath, resultJsonPath, logPath, runConfigPath } from './run/paths.js';
 import { saveRunConfig, saveStatus } from './run/state.js';
+import { applyRunOverrides, resolveStallMs } from './run/options.js';
 import type { RunConfig, StatusPayload, ResultPayload } from './run/types.js';
 import { ensureDir, readJson, pathExists, writeJsonAtomic } from './utils/fs.js';
 import { nowIso, sleep } from './utils/time.js';
-import { chromeUserDataDirMac, listChromeProfilesMac, firefoxProfilesMac, oracleChromeDataDir } from './browser/profiles.js';
+import { oracleChromeDataDir, oracleFirefoxDataDir } from './browser/profiles.js';
 import { DEFAULT_BASE_URL } from './browser/chatgpt.js';
 
 const program = new Command();
@@ -24,16 +25,13 @@ program
   .option('--prompt-file <path>', 'path to prompt file')
   .option('--browser <browser>', 'chrome or firefox', 'chrome')
   .option('--base-url <url>', 'ChatGPT base URL', DEFAULT_BASE_URL)
-  .option('--profile-name <name>', 'Chrome profile name (UI-visible)')
-  .option('--profile-dir <dir>', 'Chrome profile directory name, e.g. "Profile 2"')
-  .option('--user-data-dir <dir>', 'Chrome user data dir', oracleChromeDataDir())
-  .option('--firefox-profile <path>', 'Firefox profile path')
+  .option('--firefox-profile <path>', 'Firefox profile path (defaults to ~/.oracle/firefox)')
   .option('--runs-root <dir>', 'Runs root directory', defaultRunsRoot())
   .option('--allow-visible', 'Allow visible window for login', false)
   .option('--allow-kill', 'Allow killing automation Chrome if stuck', false)
   .option('--poll-ms <ms>', 'Polling interval for streaming', '1500')
   .option('--stable-ms <ms>', 'Stable interval to finalize response', '8000')
-  .option('--stall-ms <ms>', 'Stall interval while generating before recovery', '120000')
+  .option('--stall-ms <ms>', 'Stall interval while generating before recovery (defaults to 20% of timeout, min 2m, max 30m)')
   .option('--timeout-ms <ms>', 'Max wait time for completion', `${2 * 60 * 60 * 1000}`)
   .option('--max-attempts <n>', 'Max attempts', '3')
   .option('--json', 'Output machine-readable JSON', false)
@@ -46,16 +44,8 @@ program
     const promptHash = crypto.createHash('sha256').update(prompt).digest('hex');
     const browser = options.browser === 'firefox' ? 'firefox' : 'chrome';
 
-    let userDataDir = options.userDataDir as string;
-    if (options.profileName && userDataDir === oracleChromeDataDir()) {
-      userDataDir = chromeUserDataDirMac();
-    }
-
     const profile = resolveProfile({
       browser,
-      profileName: options.profileName,
-      profileDir: options.profileDir,
-      userDataDir,
       firefoxProfile: options.firefoxProfile,
     });
 
@@ -72,8 +62,8 @@ program
       allowKill: Boolean(options.allowKill),
       pollMs: Number(options.pollMs),
       stableMs: Number(options.stableMs),
-      stallMs: Number(options.stallMs),
       timeoutMs: Number(options.timeoutMs),
+      stallMs: resolveStallMs(Number(options.timeoutMs), options.stallMs ? Number(options.stallMs) : undefined),
       attempt: 1,
       maxAttempts: Number(options.maxAttempts),
       outDir: runDirPath,
@@ -162,8 +152,18 @@ program
   .description('Resume a run')
   .argument('<run_id>', 'run id')
   .option('--runs-root <dir>', 'Runs root directory', defaultRunsRoot())
+  .option('--allow-visible', 'Allow visible window for login', false)
+  .option('--allow-kill', 'Allow killing automation Chrome if stuck', false)
   .action(async (runId, options) => {
     const runDirPath = runDir(runId, options.runsRoot);
+    if (options.allowVisible || options.allowKill) {
+      const config = await readJson<RunConfig>(runConfigPath(runDirPath));
+      applyRunOverrides(config, {
+        allowVisible: options.allowVisible ? true : undefined,
+        allowKill: options.allowKill ? true : undefined,
+      });
+      await saveRunConfig(config.runPath, config);
+    }
     await spawnWorker(runDirPath);
     // eslint-disable-next-line no-console
     console.log(`Resumed: ${runId}`);
@@ -200,32 +200,6 @@ program
         break;
       }
       await sleep(1000);
-    }
-  });
-
-program
-  .command('profiles')
-  .description('List available browser profiles')
-  .option('--user-data-dir <dir>', 'Chrome user data dir', chromeUserDataDirMac())
-  .option('--json', 'Output JSON', false)
-  .action(async (options) => {
-    const chromeProfiles = listChromeProfilesMac(options.userDataDir);
-    const firefoxProfiles = firefoxProfilesMac();
-    if (options.json) {
-      writeJson({ chrome: chromeProfiles, firefox: firefoxProfiles });
-      return;
-    }
-    // eslint-disable-next-line no-console
-    console.log('Chrome profiles:');
-    for (const profile of chromeProfiles) {
-      // eslint-disable-next-line no-console
-      console.log(`- ${profile.name} (${profile.dir})`);
-    }
-    // eslint-disable-next-line no-console
-    console.log('Firefox profiles:');
-    for (const profile of firefoxProfiles) {
-      // eslint-disable-next-line no-console
-      console.log(`- ${profile.name} (${profile.path})`);
     }
   });
 
@@ -278,44 +252,19 @@ function generateRunId(): string {
 
 function resolveProfile(input: {
   browser: 'chrome' | 'firefox';
-  profileName?: string;
-  profileDir?: string;
-  userDataDir?: string;
   firefoxProfile?: string;
 }): RunConfig['profile'] {
   if (input.browser === 'firefox') {
-    const profiles = firefoxProfilesMac();
-    const resolvedProfile = input.firefoxProfile ?? profiles[0]?.path;
-    if (!resolvedProfile) {
-      throw new Error('Firefox profile not found. Provide --firefox-profile or create one.');
-    }
+    const resolvedProfile = input.firefoxProfile ?? oracleFirefoxDataDir();
     return {
       kind: 'firefox',
       userDataDir: resolvedProfile,
       profileDir: resolvedProfile,
-      profileName: input.profileName ?? profiles[0]?.name,
     };
   }
-
-  if (input.profileName) {
-    const profiles = listChromeProfilesMac(input.userDataDir ?? chromeUserDataDirMac());
-    const matches = profiles.filter((profile) => profile.name === input.profileName);
-    if (matches.length !== 1) {
-      throw new Error(`Profile name "${input.profileName}" matched ${matches.length} profiles`);
-    }
-    return {
-      kind: 'chrome',
-      userDataDir: input.userDataDir ?? chromeUserDataDirMac(),
-      profileDir: matches[0].dir,
-      profileName: matches[0].name,
-    };
-  }
-
   return {
     kind: 'chrome',
-    userDataDir: input.userDataDir ?? chromeUserDataDirMac(),
-    profileDir: input.profileDir,
-    profileName: input.profileName,
+    userDataDir: oracleChromeDataDir(),
   };
 }
 

@@ -44,7 +44,7 @@ function buildHtml() {
   </style>
 </head>
 <body>
-  <div class="messages" id="messages"></div>
+  <main class="messages" id="messages"></main>
   <div class="controls">
     <textarea id="prompt-textarea" placeholder="Message ChatGPT"></textarea>
     <button id="send" aria-label="Send prompt">Send</button>
@@ -73,11 +73,14 @@ function buildHtml() {
       simulateStreaming(prompt);
     }
 
+    let messageIndex = 0;
     function appendMessage(role, text) {
       const div = document.createElement('div');
       div.className = 'msg ' + role;
       div.setAttribute('data-message-author-role', role);
       const article = document.createElement('article');
+      messageIndex += 1;
+      article.setAttribute('data-testid', 'conversation-turn-' + messageIndex);
       article.innerText = text;
       div.appendChild(article);
       messages.appendChild(div);
@@ -87,9 +90,11 @@ function buildHtml() {
 
     function simulateStreaming(prompt) {
       const params = new URLSearchParams(location.search);
-      const delay = Number(params.get('delayMs') || 50);
+      const durationMs = Number(params.get('durationMs') || 0);
+      const delayMsParam = Number(params.get('delayMs') || 50);
       const stall = params.get('stall') === '1';
       const response = 'Echo: ' + prompt + '\\n\\nThis is a mocked streaming response.';
+      const delay = durationMs ? Math.max(10, Math.floor(durationMs / response.length)) : delayMsParam;
       const article = appendMessage('assistant', '');
       stop.style.display = 'inline-block';
       let idx = 0;

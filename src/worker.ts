@@ -13,7 +13,6 @@ import {
   waitForCompletion,
   waitForPromptInput,
 } from './browser/chatgpt.js';
-import { chromeUserDataDirMac } from './browser/profiles.js';
 import { saveResultJson, saveResultMarkdown, saveRunConfig, saveStatus } from './run/state.js';
 import type { RunConfig, StatusPayload } from './run/types.js';
 import { readJson, pathExists } from './utils/fs.js';
@@ -182,15 +181,6 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
       await finalizeCanceled(config, logger, 'Canceled by user');
       return 'completed';
     }
-    if (shouldRequestProfileAssistance(error, config)) {
-      await writeNeedsUser(
-        config,
-        'profile',
-        'System Chrome profile failed to start debug port. Use --user-data-dir ~/.oracle/chrome or pre-launch Chrome with --remote-debugging-port, then resume.',
-        'launch',
-      );
-      return 'needs_user';
-    }
     logger(`[worker] runAttempt error: ${String(error)}`);
     try {
       await attemptRecovery(config, browser, page, logger, runDir);
@@ -239,25 +229,45 @@ async function attemptRecovery(
     } catch (error) {
       logger(`[recovery] reload failed: ${String(error)}`);
     }
+    if (runtime.ok && pageHealth.ok) {
+      return;
+    }
+    const postRuntime = await checkBrowserRuntime(browser);
+    const postPage = await checkPageResponsive(page);
+    logger(`[recovery] post-reload runtime=${postRuntime.ok} page=${postPage.ok}`);
+    if (postRuntime.ok && postPage.ok) {
+      return;
+    }
+  }
+
+  if (config.browser !== 'chrome') {
     return;
   }
 
   if (!config.allowKill) {
-    await writeNeedsUser(config, 'kill_chrome', 'Chrome debug endpoint unreachable; allow-kill required to restart');
+    const reason = debug.ok
+      ? 'Chrome unresponsive; allow-kill required to restart'
+      : 'Chrome debug endpoint unreachable; allow-kill required to restart';
+    await writeNeedsUser(config, 'kill_chrome', reason, 'launch');
     throw new NeedsUserError('kill_chrome', 'Chrome stuck; requires user approval');
   }
+  await writeStatus(config, 'running', 'launch', 'Chrome stuck; restarting browser');
 
+  const hadDefaultChrome = config.browser === 'chrome' ? await isDefaultChromeRunning(config.profile.userDataDir) : false;
   if (config.browserPid) {
-    logger(`[recovery] killing chrome pid ${config.browserPid}`);
-    try {
-      process.kill(config.browserPid, 'SIGKILL');
-    } catch (error) {
-      logger(`[recovery] kill failed: ${String(error)}`);
+    const pid = config.browserPid;
+    logger(`[recovery] attempting graceful shutdown for chrome pid ${pid}`);
+    const terminated = await shutdownChromePid(pid, logger);
+    if (!terminated) {
+      logger(`[recovery] chrome pid ${pid} did not exit after graceful shutdown`);
     }
   }
 
-  if (config.browser === 'chrome') {
-    await openDefaultChrome(logger);
+  if (config.browser === 'chrome' && config.browserPid && hadDefaultChrome) {
+    const stillRunning = await isDefaultChromeRunning(config.profile.userDataDir);
+    if (!stillRunning) {
+      await openDefaultChrome(logger);
+    }
   }
 }
 
@@ -265,6 +275,36 @@ async function openDefaultChrome(logger: (msg: string) => void): Promise<void> {
   logger('[recovery] opening default Chrome for user');
   const { spawn } = await import('child_process');
   spawn('open', ['-a', 'Google Chrome'], { stdio: 'ignore', detached: true }).unref();
+}
+
+async function shutdownChromePid(pid: number, logger: (msg: string) => void, timeoutMs = 10_000): Promise<boolean> {
+  if (!isProcessAlive(pid)) return true;
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (error) {
+    logger(`[recovery] graceful shutdown failed: ${String(error)}`);
+  }
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (!isProcessAlive(pid)) return true;
+    await sleep(250);
+  }
+  logger(`[recovery] force killing chrome pid ${pid}`);
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch (error) {
+    logger(`[recovery] force kill failed: ${String(error)}`);
+  }
+  return !isProcessAlive(pid);
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function writeStatus(config: RunConfig, state: StatusPayload['state'], stage: StatusPayload['stage'], message?: string): Promise<void> {
@@ -495,6 +535,11 @@ async function waitForCompletionWithCancel(
   runDir: string,
 ): Promise<import('./browser/chatgpt.js').WaitForCompletionResult> {
   let done = false;
+  const heartbeatTimer = setInterval(() => {
+    if (done) return;
+    writeStatus(config, 'running', 'waiting', 'awaiting response').catch(() => null);
+  }, 30_000);
+  heartbeatTimer.unref?.();
   const cancelWatcher = (async () => {
     while (!done) {
       if (await isCanceled(runDir)) {
@@ -518,6 +563,7 @@ async function waitForCompletionWithCancel(
     ]);
   } finally {
     done = true;
+    clearInterval(heartbeatTimer);
   }
 }
 
@@ -561,17 +607,23 @@ function parseArgs(argv: string[]): { runDir?: string } {
   return args;
 }
 
-function shouldRequestProfileAssistance(error: unknown, config: RunConfig): boolean {
-  if (config.browser !== 'chrome') return false;
-  if (!isSystemChromeProfile(config.profile.userDataDir)) return false;
-  if (!(error instanceof Error)) return false;
-  return /Chrome debug endpoint failed to start/i.test(error.message);
-}
-
-function isSystemChromeProfile(userDataDir: string): boolean {
-  const normalized = path.resolve(userDataDir);
-  const systemDir = path.resolve(chromeUserDataDirMac());
-  return normalized === systemDir;
+async function isDefaultChromeRunning(oracleUserDataDir: string): Promise<boolean> {
+  const { execFile } = await import('child_process');
+  const output = await new Promise<string>((resolve) => {
+    execFile('ps', ['-ax', '-o', 'command='], (err, stdout) => {
+      if (err) return resolve('');
+      resolve(stdout);
+    });
+  });
+  const normalized = path.resolve(oracleUserDataDir);
+  const lines = output.split(/\n/);
+  for (const line of lines) {
+    if (!line.includes('Google Chrome')) continue;
+    if (line.includes('--type=')) continue;
+    if (line.includes(`--user-data-dir=${normalized}`)) continue;
+    return true;
+  }
+  return false;
 }
 
 main().catch((error) => {

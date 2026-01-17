@@ -22,7 +22,6 @@ export type ProfileConfig = {
   kind: 'chrome' | 'firefox';
   userDataDir: string;
   profileDir?: string;
-  profileName?: string;
 };
 
 export type RunConfig = {
