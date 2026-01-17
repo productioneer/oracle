@@ -237,6 +237,10 @@ program
   .action(async (runId, options) => {
     const runDirPath = runDir(runId, options.runsRoot);
     const config = await readJson<RunConfig>(runConfigPath(runDirPath));
+    if (config.browser === 'chrome' && !config.debugPort) {
+      config.debugPort = await getFreePort();
+      await saveRunConfig(config.runPath, config);
+    }
     await openVisible(config);
     // eslint-disable-next-line no-console
     console.log(`Opened browser for ${runId}`);
@@ -345,6 +349,7 @@ async function openVisible(config: RunConfig): Promise<void> {
     args.push('--no-first-run', '--no-default-browser-check');
     args.push(`--user-data-dir=${config.profile.userDataDir}`);
     if (config.profile.profileDir) args.push(`--profile-directory=${config.profile.profileDir}`);
+    if (config.debugPort) args.push(`--remote-debugging-port=${config.debugPort}`);
     if (config.conversationUrl) args.push(config.conversationUrl);
     spawn('open', ['-n', '-a', 'Google Chrome', '--args', ...args], { stdio: 'ignore', detached: true }).unref();
     return;
@@ -357,4 +362,20 @@ async function openVisible(config: RunConfig): Promise<void> {
     if (config.conversationUrl) args.push(config.conversationUrl);
     spawn('open', ['-n', '-a', 'Firefox', '--args', ...args], { stdio: 'ignore', detached: true }).unref();
   }
+}
+
+async function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = require('net').createServer();
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        reject(new Error('Failed to allocate port'));
+        return;
+      }
+      const port = address.port;
+      server.close(() => resolve(port));
+    });
+    server.on('error', reject);
+  });
 }

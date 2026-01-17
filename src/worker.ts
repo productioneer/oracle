@@ -9,6 +9,7 @@ import {
   ensureChatGptReady,
   navigateToChat,
   submitPrompt,
+  waitForUserMessage,
   waitForCompletion,
   waitForPromptInput,
 } from './browser/chatgpt.js';
@@ -26,6 +27,7 @@ class NeedsUserError extends Error {
     this.kind = kind;
   }
 }
+class CancelError extends Error {}
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -96,6 +98,10 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
       browser = connection.browser;
       page = await browser.newPage();
     }
+    if (page) {
+      attachNetworkTracing(page, logger);
+      await injectTextDocsCapture(page, logger);
+    }
 
     await writeStatus(config, 'running', 'login', 'navigating to ChatGPT');
     await navigateWithFallback(page, config.baseUrl);
@@ -128,20 +134,24 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
       if (typedValue.trim() !== config.prompt.trim()) {
         logger(`[prompt] mismatch typed="${typedValue}" expected="${config.prompt}"`);
       }
+      const submitted = await waitForUserMessage(page, config.prompt, 8_000);
+      if (!submitted) {
+        logger('[prompt] user message not detected; retrying submit');
+        await submitPrompt(page, config.prompt);
+      }
       await sleep(1000);
       await maybeCaptureConversationUrl(page, config);
       await saveRunConfig(config.runPath, config);
     }
 
     await writeStatus(config, 'running', 'waiting', 'awaiting response');
-    const completion = await waitForCompletion(page, {
-      timeoutMs: config.timeoutMs,
-      stableMs: config.stableMs,
-      stallMs: config.stallMs,
-      pollMs: config.pollMs,
-    });
+    const completion = await waitForCompletionWithCancel(page, config, runDir);
 
-    if (config.baseUrl.includes('127.0.0.1') || config.baseUrl.includes('localhost')) {
+    if (
+      config.baseUrl.includes('127.0.0.1') ||
+      config.baseUrl.includes('localhost') ||
+      process.env.ORACLE_CAPTURE_HTML === '1'
+    ) {
       await captureDebugArtifacts(page, config, logger, 'completion');
     }
 
@@ -166,6 +176,10 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
   } catch (error) {
     if (error instanceof NeedsUserError) {
       return 'needs_user';
+    }
+    if (error instanceof CancelError) {
+      await finalizeCanceled(config, logger, 'Canceled by user');
+      return 'completed';
     }
     logger(`[worker] runAttempt error: ${String(error)}`);
     try {
@@ -285,7 +299,12 @@ async function promptAlreadySubmitted(page: import('puppeteer').Page, prompt: st
   const trimmed = prompt.trim();
   return page.evaluate((needle) => {
     const nodes = Array.from(document.querySelectorAll('[data-message-author-role="user"]')) as HTMLElement[];
-    return nodes.some((node) => (node.innerText || '').trim() === needle);
+    if (nodes.length) {
+      return nodes.some((node) => (node.innerText || '').trim() === needle);
+    }
+    const main = (document.querySelector('main') as HTMLElement | null) ?? (document.querySelector('[role="main"]') as HTMLElement | null);
+    const haystack = (main?.innerText ?? document.body?.innerText ?? '').trim();
+    return haystack.includes(needle);
   }, trimmed);
 }
 
@@ -304,15 +323,190 @@ async function captureDebugArtifacts(
     await fs.promises.writeFile(path.join(debugDir, `${label}.html`), html, 'utf8');
     await fs.promises.writeFile(path.join(debugDir, `${label}.json`), JSON.stringify(meta, null, 2), 'utf8');
     await page.screenshot({ path: path.join(debugDir, `${label}.png`) }).catch(() => null);
+    const diagnostics = await page
+      .evaluate(() => {
+        const main = document.querySelector('main') as HTMLElement | null;
+        const roleMain = document.querySelector('[role="main"]') as HTMLElement | null;
+        const testIds = Array.from(document.querySelectorAll('[data-testid]'))
+          .map((el) => el.getAttribute('data-testid') || '')
+          .filter(Boolean);
+        const testIdCounts: Record<string, number> = {};
+        for (const id of testIds) {
+          testIdCounts[id] = (testIdCounts[id] ?? 0) + 1;
+        }
+        const topTestIds = Object.entries(testIdCounts)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 40)
+          .map(([id, count]) => ({ id, count }));
+        const buttonLabels = Array.from(document.querySelectorAll('button'))
+          .map((button) => (button as HTMLButtonElement).innerText.trim())
+          .filter(Boolean)
+          .slice(0, 40);
+        return {
+          title: document.title,
+          url: window.location.href,
+          mainText: main?.innerText ?? '',
+          roleMainText: roleMain?.innerText ?? '',
+          bodyText: document.body?.innerText ?? '',
+          articleCount: document.querySelectorAll('article').length,
+          messageAuthorCount: document.querySelectorAll('[data-message-author-role]').length,
+          topTestIds,
+          buttonLabels,
+        };
+      })
+      .catch(() => null);
+    if (diagnostics) {
+      const { mainText, roleMainText, bodyText, ...rest } = diagnostics;
+      await fs.promises.writeFile(
+        path.join(debugDir, `${label}-diagnostics.json`),
+        JSON.stringify(rest, null, 2),
+        'utf8',
+      );
+      if (mainText) {
+        await fs.promises.writeFile(
+          path.join(debugDir, `${label}-main.txt`),
+          truncateText(mainText, 20000),
+          'utf8',
+        );
+      }
+      if (roleMainText) {
+        await fs.promises.writeFile(
+          path.join(debugDir, `${label}-role-main.txt`),
+          truncateText(roleMainText, 20000),
+          'utf8',
+        );
+      }
+      if (bodyText) {
+        await fs.promises.writeFile(
+          path.join(debugDir, `${label}-body.txt`),
+          truncateText(bodyText, 40000),
+          'utf8',
+        );
+      }
+    }
+    if (label === 'completion') {
+      const messageHtml = await page.evaluate(() => {
+        const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]')) as HTMLElement[];
+        const last = nodes[nodes.length - 1];
+        return last?.outerHTML ?? '';
+      });
+      if (messageHtml) {
+        await fs.promises.writeFile(path.join(debugDir, `${label}-assistant.html`), messageHtml, 'utf8');
+      }
+      const conversation = await page.evaluate(async () => {
+        const match = window.location.pathname.match(/\/c\/([a-z0-9-]+)/i);
+        if (!match) return null;
+        const response = await fetch(`/backend-api/conversation/${match[1]}`, { credentials: 'include' });
+        if (!response.ok) return { status: response.status };
+        return await response.json();
+      });
+      if (conversation) {
+        await fs.promises.writeFile(
+          path.join(debugDir, `${label}-conversation.json`),
+          JSON.stringify(conversation, null, 2),
+          'utf8',
+        );
+      }
+    }
   } catch (error) {
     logger(`[debug] capture failed: ${String(error)}`);
   }
+}
+
+function truncateText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return text.slice(-maxChars);
 }
 
 async function maybeCaptureConversationUrl(page: import('puppeteer').Page, config: RunConfig): Promise<void> {
   const url = page.url();
   if (url.includes('/c/') || url.includes('/chat/') || url.includes('/conversation/')) {
     config.conversationUrl = url;
+  }
+}
+
+function attachNetworkTracing(page: import('puppeteer').Page, logger: (msg: string) => void): void {
+  if (process.env.ORACLE_TRACE_NETWORK !== '1') return;
+  const shouldLog = (url: string) => /backend-api|conversation|event-stream/i.test(url);
+  page.on('response', (response) => {
+    const url = response.url();
+    if (!shouldLog(url)) return;
+    const method = response.request().method();
+    const status = response.status();
+    logger(`[net] ${status} ${method} ${url}`);
+  });
+  page.on('requestfailed', (request) => {
+    const url = request.url();
+    if (!shouldLog(url)) return;
+    logger(`[net] failed ${request.method()} ${url} ${request.failure()?.errorText ?? ''}`.trim());
+  });
+}
+
+async function injectTextDocsCapture(page: import('puppeteer').Page, logger: (msg: string) => void): Promise<void> {
+  const script = () => {
+    const globalAny = window as any;
+    if (globalAny.__oracleFetchPatched) return;
+    globalAny.__oracleFetchPatched = true;
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async (...args: Parameters<typeof fetch>) => {
+      const response = await originalFetch(...args);
+      try {
+        const input = args[0] as any;
+        const url = typeof input === 'string' ? input : input?.url ?? '';
+        if (url.includes('/textdocs')) {
+          const clone = response.clone();
+          clone
+            .json()
+            .then((data) => {
+              globalAny.__oracleTextDocs = data;
+              globalAny.__oracleTextDocsUrl = url;
+              globalAny.__oracleTextDocsAt = Date.now();
+            })
+            .catch(() => null);
+        }
+      } catch {
+        return response;
+      }
+      return response;
+    };
+  };
+  try {
+    await page.evaluateOnNewDocument(script);
+    await page.evaluate(script);
+  } catch (error) {
+    logger(`[debug] inject textdocs capture failed: ${String(error)}`);
+  }
+}
+
+async function waitForCompletionWithCancel(
+  page: import('puppeteer').Page,
+  config: RunConfig,
+  runDir: string,
+): Promise<import('./browser/chatgpt.js').WaitForCompletionResult> {
+  let done = false;
+  const cancelWatcher = (async () => {
+    while (!done) {
+      if (await isCanceled(runDir)) {
+        throw new CancelError('Canceled by user');
+      }
+      await sleep(1000);
+    }
+    return null as never;
+  })();
+
+  try {
+    return await Promise.race([
+      waitForCompletion(page, {
+        timeoutMs: config.timeoutMs,
+        stableMs: config.stableMs,
+        stallMs: config.stallMs,
+        pollMs: config.pollMs,
+        prompt: config.prompt,
+      }),
+      cancelWatcher,
+    ]);
+  } finally {
+    done = true;
   }
 }
 

@@ -41,3 +41,11 @@ Use the mock `stall=1` query to simulate a streaming stall and confirm recovery:
 ```
 node dist/cli.js run --prompt "stall" --base-url http://127.0.0.1:7777/?stall=1 --stall-ms 30000 --timeout-ms 120000
 ```
+
+## Debug Capture
+
+Set `ORACLE_CAPTURE_HTML=1` to save `completion.html`/`completion.png` for real ChatGPT runs:
+
+```
+ORACLE_CAPTURE_HTML=1 node dist/cli.js run --prompt "Hello"
+```
