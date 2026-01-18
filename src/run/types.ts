@@ -1,3 +1,6 @@
+import type { FocusStatus } from '../browser/focus.js';
+import type { FirefoxAppConfig } from '../browser/firefox-app.js';
+
 export type BrowserType = 'chrome' | 'firefox';
 
 export type RunState =
@@ -16,6 +19,7 @@ export type RunStage =
   | 'submit'
   | 'waiting'
   | 'extract'
+  | 'recovery'
   | 'cleanup';
 
 export type ProfileConfig = {
@@ -44,6 +48,7 @@ export type RunConfig = {
   conversationUrl?: string;
   lastAssistantIndex?: number;
   modelHint?: string;
+  firefoxApp?: FirefoxAppConfig;
   attempt: number;
   maxAttempts: number;
   outDir: string;
@@ -55,6 +60,8 @@ export type RunConfig = {
   startedAt?: string;
   completedAt?: string;
   lastError?: string;
+  focus?: FocusStatus;
+  focusOnly?: boolean;
 };
 
 export type StatusPayload = {
@@ -66,9 +73,10 @@ export type StatusPayload = {
   attempt: number;
   conversationUrl?: string;
   needs?: {
-    type: 'login' | 'cloudflare' | 'kill_chrome' | 'profile' | 'unknown';
+    type: 'login' | 'cloudflare' | 'kill_chrome' | 'profile' | 'firefox_app' | 'unknown';
     details?: string;
   };
+  focus?: FocusStatus;
 };
 
 export type ResultPayload = {

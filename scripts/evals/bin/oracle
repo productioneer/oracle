@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+DIST_CLI="$REPO_ROOT/dist/cli.js"
+SRC_CLI="$REPO_ROOT/src/cli.ts"
+EVAL_BASE_URL="${ORACLE_EVAL_BASE_URL:-http://127.0.0.1:7777/}"
+
+ARGS=("$@")
+if [ "${ARGS[0]:-}" = "run" ]; then
+  FILTERED=()
+  SKIP_NEXT=false
+  for ARG in "${ARGS[@]}"; do
+    if $SKIP_NEXT; then
+      SKIP_NEXT=false
+      continue
+    fi
+    if [ "$ARG" = "--base-url" ]; then
+      SKIP_NEXT=true
+      continue
+    fi
+    FILTERED+=("$ARG")
+  done
+  ARGS=("${FILTERED[@]}" "--base-url" "$EVAL_BASE_URL")
+fi
+
+if [ -f "$DIST_CLI" ]; then
+  exec node "$DIST_CLI" "${ARGS[@]}"
+fi
+
+exec npx tsx "$SRC_CLI" "${ARGS[@]}"

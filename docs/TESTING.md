@@ -58,6 +58,30 @@ Automated extraction tests validate JSON/XML/exact-string outputs using headless
 npm test
 ```
 
+## Agent SDK Evals (Codex + Claude)
+
+Runs oracle via the mock ChatGPT server (no chatgpt.com). Uses real agents:
+
+```
+npm run eval:agents
+```
+
+Individual runs:
+
+```
+npm run eval:codex
+npm run eval:claude
+```
+
+Notes:
+- Uses the mock server on `127.0.0.1:7777`.
+- Codex eval uses `@openai/codex-sdk` (bundled codex binary). Ensure Codex credentials are configured.
+- Claude eval shells out to `claude` CLI. Ensure Claude Code is installed and logged in.
+- Results are written to `scripts/evals/results/`.
+- Eval harness strips any `*_API_KEY` variables from the agent process environment.
+- Optional: set `ORACLE_EVAL_SKIP_CLAUDE=1` or `ORACLE_EVAL_SKIP_CODEX=1` to run one agent.
+- Optional: set `ORACLE_EVAL_AGENT_TIMEOUT_MS` to cap agent runtime.
+
 ## Debug Capture
 
 Set `ORACLE_CAPTURE_HTML=1` to save `completion.html`/`completion.png` for real ChatGPT runs:

@@ -1,7 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import { launchChrome, createHiddenPage } from './browser/chrome.js';
-import { launchFirefox } from './browser/firefox.js';
+import { launchFirefox, FirefoxProfileInUseError, cleanupAutomationProfile } from './browser/firefox.js';
+import { resolveFirefoxApp } from './browser/firefox-app.js';
+import { applyFocusStrategy, FIREFOX_SETUP_DELAY_MS, resizeFirefoxWindow, runFirefoxSetupPhase } from './browser/focus.js';
 import { checkBrowserRuntime, checkDebugEndpoint, checkPageResponsive } from './browser/health.js';
 import {
   DEFAULT_BASE_URL,
@@ -75,6 +77,23 @@ async function main(): Promise<void> {
 async function runAttempt(config: RunConfig, logger: (msg: string) => void, runDir: string): Promise<'completed' | 'needs_user'> {
   let browser: import('puppeteer').Browser | null = null;
   let page: import('puppeteer').Page | null = null;
+  let keepFirefoxAlive = false;
+  let firefoxApp = config.firefoxApp;
+  if (config.browser === 'firefox' && process.platform === 'darwin') {
+    try {
+      firefoxApp = firefoxApp ?? resolveFirefoxApp();
+      if (firefoxApp && !config.firefoxApp) {
+        config.firefoxApp = firefoxApp;
+        await saveRunConfig(config.runPath, config);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await writeNeedsUser(config, 'firefox_app', message, 'launch');
+      throw new NeedsUserError('firefox_app', message);
+    }
+  }
+  const appName = config.browser === 'firefox' ? firefoxApp?.appName ?? 'Firefox' : 'Google Chrome';
+  let firefoxPid: number | undefined;
   try {
     if (config.browser === 'chrome') {
       const connection = await launchChrome({
@@ -90,17 +109,95 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
       await saveRunConfig(config.runPath, config);
       page = await createHiddenPage(browser, config.runId);
     } else {
-      const connection = await launchFirefox({
-        profilePath: config.profile.profileDir ?? config.profile.userDataDir,
-        allowVisible: config.allowVisible,
-        logger,
-      });
+      let connection: Awaited<ReturnType<typeof launchFirefox>>;
+      try {
+        connection = await launchFirefox({
+          profilePath: config.profile.profileDir ?? config.profile.userDataDir,
+          allowVisible: config.allowVisible,
+          reuse: config.focusOnly ? false : !config.allowVisible,
+          executablePath: firefoxApp?.executablePath,
+          appPath: firefoxApp?.appPath,
+          logger,
+        });
+      } catch (error) {
+        if (error instanceof FirefoxProfileInUseError) {
+          await writeNeedsUser(config, 'profile', error.message, 'launch');
+          throw new NeedsUserError('profile', error.message);
+        }
+        throw error;
+      }
       browser = connection.browser;
+      keepFirefoxAlive = connection.keepAlive;
+      firefoxPid = connection.pid;
+      const setup = config.allowVisible ? null : await runFirefoxSetupPhase(appName, firefoxPid, logger);
+      if (setup?.focus) {
+        config.focus = setup.focus;
+      } else {
+        const focusStatus = await applyFocusStrategy({
+          browser: config.browser,
+          allowVisible: config.allowVisible,
+          appName,
+          pid: firefoxPid,
+          logger,
+        });
+        if (focusStatus) {
+          config.focus = focusStatus;
+        }
+      }
+      if (!firefoxPid && !config.allowVisible) {
+        config.focus = config.focus ?? { state: 'visible', reason: 'pid-mismatch' };
+      }
+      if (config.focus) {
+        await saveRunConfig(config.runPath, config);
+        const focusMessage = buildFocusMessage(config.focus, config.allowVisible);
+        if (focusMessage) {
+          await writeStatus(config, 'running', 'launch', focusMessage);
+        }
+      }
+      if (!config.allowVisible) {
+        await sleep(FIREFOX_SETUP_DELAY_MS);
+      }
+      if (config.focusOnly) {
+        await finalizeFocusOnly(config, logger, 'focus-only completed');
+        return 'completed';
+      }
+      if (!config.allowVisible) {
+        const resizeWork = await resizeFirefoxWindow(appName, firefoxPid, 'work', logger);
+        mergeFocusNeeds(config, resizeWork.needsUser);
+        if (resizeWork.reason === 'window-mismatch' && !config.allowVisible) {
+          config.focus = config.focus ?? { state: 'visible', reason: 'window-mismatch' };
+        }
+        if (resizeWork.needsUser) {
+          await saveRunConfig(config.runPath, config);
+        }
+      }
       page = await browser.newPage();
     }
-    if (page) {
-      attachNetworkTracing(page, logger);
-      await injectTextDocsCapture(page, logger);
+    if (config.browser === 'chrome') {
+      const focusStatus = await applyFocusStrategy({
+        browser: config.browser,
+        allowVisible: config.allowVisible,
+        appName,
+        logger,
+      });
+      if (focusStatus) {
+        config.focus = focusStatus;
+        await saveRunConfig(config.runPath, config);
+        const focusMessage = buildFocusMessage(focusStatus, config.allowVisible);
+        if (focusMessage) {
+          await writeStatus(config, 'running', 'launch', focusMessage);
+        }
+      }
+    }
+    if (!page) {
+      throw new Error('Failed to create browser page');
+    }
+    attachNetworkTracing(page, logger);
+    await injectTextDocsCapture(page, logger);
+
+    if (config.focusOnly) {
+      await finalizeFocusOnly(config, logger, 'focus-only completed');
+      return 'completed';
     }
 
     await writeStatus(config, 'running', 'login', 'navigating to ChatGPT');
@@ -171,7 +268,6 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
 
     await writeStatus(config, 'completed', 'cleanup', 'completed');
     logger(`[worker] completed run ${config.runId}`);
-    await browser.close();
     return 'completed';
   } catch (error) {
     if (error instanceof NeedsUserError) {
@@ -192,12 +288,30 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
     }
     throw error;
   } finally {
+    if (page) {
+      try {
+        await page.close();
+      } catch (closeError) {
+        logger(`[worker] page close failed: ${String(closeError)}`);
+      }
+    }
     if (browser) {
       try {
-        await browser.close();
+        const keepAlive = config.browser === 'firefox' && keepFirefoxAlive;
+        if (config.browser === 'firefox' && keepAlive) {
+          if (!config.allowVisible) {
+            await runFirefoxSetupPhase(appName, firefoxPid, logger);
+          }
+          await browser.disconnect();
+        } else {
+          await browser.close();
+        }
       } catch (closeError) {
         logger(`[worker] browser close failed: ${String(closeError)}`);
       }
+    }
+    if (config.browser === 'firefox' && config.focusOnly && !keepFirefoxAlive) {
+      await cleanupAutomationProfile(config.profile.profileDir ?? config.profile.userDataDir, logger);
     }
   }
 }
@@ -215,6 +329,7 @@ async function attemptRecovery(
   }
   if (!browser || !page) return;
 
+  await writeStatus(config, 'running', 'recovery', 'checking browser health');
   logger('[recovery] health check');
   const debug = config.debugPort ? await checkDebugEndpoint(config.debugPort) : { ok: true };
   const runtime = await checkBrowserRuntime(browser);
@@ -248,10 +363,10 @@ async function attemptRecovery(
     const reason = debug.ok
       ? 'Chrome unresponsive; allow-kill required to restart'
       : 'Chrome debug endpoint unreachable; allow-kill required to restart';
-    await writeNeedsUser(config, 'kill_chrome', reason, 'launch');
+    await writeNeedsUser(config, 'kill_chrome', reason, 'recovery');
     throw new NeedsUserError('kill_chrome', 'Chrome stuck; requires user approval');
   }
-  await writeStatus(config, 'running', 'launch', 'Chrome stuck; restarting browser');
+  await writeStatus(config, 'running', 'recovery', 'Chrome stuck; restarting browser');
 
   const hadDefaultChrome = config.browser === 'chrome' ? await isDefaultChromeRunning(config.profile.userDataDir) : false;
   if (config.browserPid) {
@@ -316,6 +431,7 @@ async function writeStatus(config: RunConfig, state: StatusPayload['state'], sta
     updatedAt: nowIso(),
     attempt: config.attempt,
     conversationUrl: config.conversationUrl,
+    focus: config.focus,
   });
 }
 
@@ -334,6 +450,7 @@ async function writeNeedsUser(
     attempt: config.attempt,
     conversationUrl: config.conversationUrl,
     needs: { type, details },
+    focus: config.focus,
   });
 }
 
@@ -493,6 +610,28 @@ function attachNetworkTracing(page: import('puppeteer').Page, logger: (msg: stri
   });
 }
 
+function buildFocusMessage(focus: NonNullable<RunConfig['focus']>, allowVisible: boolean): string | undefined {
+  if (focus.state === 'visible' && !allowVisible) {
+    if (focus.needsUser?.type) return `focus fallback: visible (${focus.needsUser.type})`;
+    return `focus fallback: ${focus.reason ?? 'visible'}`;
+  }
+  if (focus.needsUser?.type) {
+    return `focus permissions: ${focus.needsUser.type}`;
+  }
+  return undefined;
+}
+
+function mergeFocusNeeds(config: RunConfig, needs?: NonNullable<RunConfig['focus']>['needsUser']): void {
+  if (!needs) return;
+  if (!config.focus) {
+    config.focus = { state: 'visible', reason: 'focus-unknown', needsUser: needs };
+    return;
+  }
+  if (!config.focus.needsUser) {
+    config.focus.needsUser = needs;
+  }
+}
+
 async function injectTextDocsCapture(page: import('puppeteer').Page, logger: (msg: string) => void): Promise<void> {
   const script = () => {
     const globalAny = window as any;
@@ -593,6 +732,19 @@ async function finalizeFailed(config: RunConfig, logger: (msg: string) => void, 
   });
   await writeStatus(config, 'failed', 'cleanup', message);
   logger(`[worker] failed: ${message}`);
+}
+
+async function finalizeFocusOnly(config: RunConfig, logger: (msg: string) => void, message: string): Promise<void> {
+  await saveResultJson(config.resultJsonPath, {
+    runId: config.runId,
+    state: 'completed',
+    completedAt: nowIso(),
+    conversationUrl: config.conversationUrl,
+    content: '',
+  });
+  await saveResultMarkdown(config.resultPath, '');
+  await writeStatus(config, 'completed', 'cleanup', message);
+  logger(`[worker] completed focus-only run ${config.runId}`);
 }
 
 function parseArgs(argv: string[]): { runDir?: string } {

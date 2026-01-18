@@ -9,6 +9,7 @@ import type { RunConfig, StatusPayload, ResultPayload } from './run/types.js';
 import { ensureDir, readJson, pathExists, writeJsonAtomic } from './utils/fs.js';
 import { nowIso, sleep } from './utils/time.js';
 import { oracleChromeDataDir, oracleFirefoxDataDir } from './browser/profiles.js';
+import { resolveFirefoxApp } from './browser/firefox-app.js';
 import { DEFAULT_BASE_URL } from './browser/chatgpt.js';
 
 const program = new Command();
@@ -24,10 +25,12 @@ program
   .option('-p, --prompt <prompt>', 'prompt text to submit')
   .option('--prompt-file <path>', 'path to prompt file')
   .option('--browser <browser>', 'chrome or firefox', 'chrome')
-  .option('--base-url <url>', 'ChatGPT base URL', DEFAULT_BASE_URL)
+  .option('--base-url <url>', 'ChatGPT base URL (override ORACLE_BASE_URL/ORACLE_EVAL_BASE_URL)')
   .option('--firefox-profile <path>', 'Firefox profile path (defaults to ~/.oracle/firefox)')
+  .option('--firefox-app <path>', 'Firefox app bundle or binary path (Developer Edition / Nightly)')
   .option('--runs-root <dir>', 'Runs root directory', defaultRunsRoot())
   .option('--allow-visible', 'Allow visible window for login', false)
+  .option('--focus-only', 'Run focus setup only (no navigation)', false)
   .option('--allow-kill', 'Allow killing automation Chrome if stuck', false)
   .option('--poll-ms <ms>', 'Polling interval for streaming', '1500')
   .option('--stable-ms <ms>', 'Stable interval to finalize response', '8000')
@@ -48,7 +51,9 @@ program
       browser,
       firefoxProfile: options.firefoxProfile,
     });
+    const firefoxApp = browser === 'firefox' ? resolveFirefoxApp(options.firefoxApp) : undefined;
 
+    const baseUrl = resolveBaseUrl(options.baseUrl);
     const config: RunConfig = {
       runId,
       createdAt: nowIso(),
@@ -56,9 +61,11 @@ program
       promptHash,
       browser,
       profile,
+      firefoxApp,
       headless: false,
-      baseUrl: options.baseUrl,
+      baseUrl,
       allowVisible: Boolean(options.allowVisible),
+      focusOnly: Boolean(options.focusOnly),
       allowKill: Boolean(options.allowKill),
       pollMs: Number(options.pollMs),
       stableMs: Number(options.stableMs),
@@ -268,6 +275,13 @@ function resolveProfile(input: {
   };
 }
 
+function resolveBaseUrl(input?: string): string {
+  if (input) return input;
+  const env = process.env.ORACLE_BASE_URL ?? process.env.ORACLE_EVAL_BASE_URL;
+  if (env && env.trim()) return env.trim();
+  return DEFAULT_BASE_URL;
+}
+
 async function spawnWorker(runDirPath: string): Promise<void> {
   const baseDir = path.resolve(__dirname, '..');
   const distWorker = path.join(baseDir, 'dist', 'worker.js');
@@ -309,7 +323,8 @@ async function openVisible(config: RunConfig): Promise<void> {
       args.push('-profile', config.profile.profileDir);
     }
     if (config.conversationUrl) args.push(config.conversationUrl);
-    spawn('open', ['-n', '-a', 'Firefox', '--args', ...args], { stdio: 'ignore', detached: true }).unref();
+    const appPath = config.firefoxApp?.appPath ?? 'Firefox';
+    spawn('open', ['-n', '-a', appPath, '--args', ...args], { stdio: 'ignore', detached: true }).unref();
   }
 }
 

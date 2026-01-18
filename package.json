@@ -14,13 +14,17 @@
     "worker": "tsx src/worker.ts",
     "lint": "echo 'no lint configured'",
     "test": "npm run build && node --test tests/*.test.js",
-    "test:mock": "node scripts/mock-server.js --once"
+    "test:mock": "node scripts/mock-server.js --once",
+    "eval:agents": "node scripts/evals/run-agent-evals.js",
+    "eval:codex": "node scripts/evals/run-codex-agent-eval.js",
+    "eval:claude": "node scripts/evals/run-claude-agent-eval.js"
   },
   "dependencies": {
     "commander": "^12.1.0",
     "puppeteer": "^23.8.0"
   },
   "devDependencies": {
+    "@openai/codex-sdk": "^0.87.0",
     "@types/node": "^22.10.7",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
