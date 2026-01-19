@@ -9,7 +9,12 @@ import {
   DEFAULT_BASE_URL,
   FALLBACK_BASE_URL,
   ensureChatGptReady,
+  ensureWideViewport,
   navigateToChat,
+  ResponseFailedError,
+  ResponseStalledError,
+  ResponseTimeoutError,
+  setThinkingMode,
   submitPrompt,
   waitForUserMessage,
   waitForCompletion,
@@ -38,6 +43,7 @@ async function main(): Promise<void> {
   }
   const runPath = path.join(args.runDir, 'run.json');
   const config = await readJson<RunConfig>(runPath);
+  config.thinking = config.thinking ?? 'extended';
   const logger = await createLogger(config.logPath);
 
   logger(`[worker] start run ${config.runId}`);
@@ -192,6 +198,7 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
     if (!page) {
       throw new Error('Failed to create browser page');
     }
+    await ensureWideViewport(page);
     attachNetworkTracing(page, logger);
     await injectTextDocsCapture(page, logger);
 
@@ -202,6 +209,7 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
 
     await writeStatus(config, 'running', 'login', 'navigating to ChatGPT');
     await navigateWithFallback(page, config.baseUrl);
+    await ensureWideViewport(page);
 
     const ready = await ensureChatGptReady(page);
     if (ready.needsCloudflare) {
@@ -223,6 +231,18 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
     } catch (error) {
       await captureDebugArtifacts(page, config, logger, 'prompt-input');
       throw error;
+    }
+    await ensureWideViewport(page);
+
+    if (config.thinking) {
+      try {
+        const updated = await setThinkingMode(page, config.thinking);
+        if (!updated) {
+          logger('[thinking] toggle not available');
+        }
+      } catch (error) {
+        logger(`[thinking] toggle failed: ${String(error)}`);
+      }
     }
 
     if (!(await promptAlreadySubmitted(page, config.prompt))) {
@@ -688,22 +708,66 @@ async function waitForCompletionWithCancel(
     }
     return null as never;
   })();
+  let resubmitted = false;
 
-  try {
-    return await Promise.race([
+  const waitOnce = () =>
+    Promise.race([
       waitForCompletion(page, {
         timeoutMs: config.timeoutMs,
-        stableMs: config.stableMs,
-        stallMs: config.stallMs,
         pollMs: config.pollMs,
         prompt: config.prompt,
       }),
       cancelWatcher,
     ]);
+
+  try {
+    while (true) {
+      try {
+        return await waitOnce();
+      } catch (error) {
+        if (error instanceof ResponseStalledError) {
+          await refreshAfterStall(page, config);
+          continue;
+        }
+        if (error instanceof ResponseFailedError) {
+          if (resubmitted) throw error;
+          resubmitted = true;
+          await resubmitPrompt(page, config);
+          await maybeCaptureConversationUrl(page, config);
+          await saveRunConfig(config.runPath, config);
+          continue;
+        }
+        if (error instanceof ResponseTimeoutError) {
+          throw error;
+        }
+        throw error;
+      }
+    }
   } finally {
     done = true;
     clearInterval(heartbeatTimer);
   }
+}
+
+async function refreshAfterStall(page: import('puppeteer').Page, config: RunConfig): Promise<void> {
+  await writeStatus(config, 'running', 'recovery', 'refreshing after stalled response');
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await ensureWideViewport(page);
+  await sleep(1000);
+}
+
+async function resubmitPrompt(page: import('puppeteer').Page, config: RunConfig): Promise<void> {
+  await writeStatus(config, 'running', 'submit', 'resubmitting prompt');
+  await waitForPromptInput(page);
+  const typedValue = await submitPrompt(page, config.prompt);
+  if (typedValue.trim() !== config.prompt.trim()) {
+    // Best-effort; continue even if input doesn't echo exactly.
+  }
+  const submitted = await waitForUserMessage(page, config.prompt, 8_000);
+  if (!submitted) {
+    await submitPrompt(page, config.prompt);
+  }
+  await sleep(1000);
 }
 
 async function isCanceled(runDir: string): Promise<boolean> {

@@ -40,9 +40,8 @@ export type RunConfig = {
   allowVisible: boolean;
   allowKill: boolean;
   pollMs: number;
-  stableMs: number;
-  stallMs: number;
   timeoutMs: number;
+  thinking: 'standard' | 'extended';
   debugPort?: number;
   browserPid?: number;
   conversationUrl?: string;

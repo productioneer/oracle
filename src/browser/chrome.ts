@@ -43,6 +43,7 @@ export async function launchChrome(options: ChromeLaunchOptions): Promise<Chrome
     `--user-data-dir=${userDataDir}`,
     '--no-first-run',
     '--no-default-browser-check',
+    '--window-size=1440,900',
     '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding',

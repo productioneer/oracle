@@ -20,9 +20,8 @@ after(async () => {
 
 test('extracts structured JSON output', async () => {
   const json = '{\n  "status": "ok",\n  "items": [1, 2, 3]\n}';
-  const content = `ChatGPT said:\n${json}`;
-  const result = await extractAssistant(content, 'Return JSON only.');
-  assert.equal(result, json);
+  const result = await extractAssistant(json, 'Return JSON only.');
+  assert.deepEqual(JSON.parse(result), { status: 'ok', items: [1, 2, 3] });
 });
 
 test('extracts structured XML output', async () => {

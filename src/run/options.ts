@@ -5,20 +5,8 @@ export type RunOverrides = {
   allowKill?: boolean;
   timeoutMs?: number;
   pollMs?: number;
-  stableMs?: number;
-  stallMs?: number;
+  thinking?: RunConfig['thinking'];
 };
-
-export function resolveStallMs(timeoutMs: number, stallMs?: number): number {
-  if (typeof stallMs === 'number' && Number.isFinite(stallMs) && stallMs > 0) {
-    return Math.floor(stallMs);
-  }
-  const min = 120_000;
-  const max = 30 * 60 * 1000;
-  const computed = Math.floor(timeoutMs * 0.2);
-  const bounded = Math.min(max, Math.max(min, computed));
-  return Math.min(timeoutMs, bounded);
-}
 
 export function applyRunOverrides(config: RunConfig, overrides: RunOverrides): RunConfig {
   if (overrides.allowVisible !== undefined) {
@@ -33,11 +21,8 @@ export function applyRunOverrides(config: RunConfig, overrides: RunOverrides): R
   if (overrides.pollMs !== undefined) {
     config.pollMs = overrides.pollMs;
   }
-  if (overrides.stableMs !== undefined) {
-    config.stableMs = overrides.stableMs;
-  }
-  if (overrides.stallMs !== undefined) {
-    config.stallMs = overrides.stallMs;
+  if (overrides.thinking !== undefined) {
+    config.thinking = overrides.thinking;
   }
   return config;
 }
