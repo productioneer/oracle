@@ -589,7 +589,13 @@ async function attemptRecovery(
         logger(
           `[recovery] attempting graceful shutdown for personal chrome pid ${pid}`,
         );
-        await shutdownChromePid(pid, logger, 10_000, true);
+        const graceful = await shutdownChromePid(pid, logger, 8_000, false);
+        if (!graceful) {
+          logger(
+            `[recovery] personal chrome pid ${pid} still alive after graceful shutdown; forcing kill`,
+          );
+          await shutdownChromePid(pid, logger, 0, true);
+        }
       }
     }
     const personalPidsAfter = await listPersonalChromePids(oracleUserDataDir);
