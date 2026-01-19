@@ -13,6 +13,7 @@ const {
   tryAcquireRestartLock,
   waitForChromeRestartApproval,
 } = require('../dist/notifications/chrome-restart.js');
+const { requiresPersonalChromeApproval } = require('../dist/browser/chrome-approval.js');
 
 const testDir = path.join(os.tmpdir(), `oracle-approvals-${Date.now()}`);
 
@@ -63,4 +64,10 @@ test('waiters: one restart, others see done', async () => {
 
   const resultB = await runB;
   assert.equal(resultB.action, 'done');
+});
+
+test('requiresPersonalChromeApproval only for non-oracle profile', () => {
+  const oracleDir = path.join(os.homedir(), '.oracle', 'chrome');
+  assert.equal(requiresPersonalChromeApproval(oracleDir), false);
+  assert.equal(requiresPersonalChromeApproval(path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome')), true);
 });

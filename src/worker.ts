@@ -18,6 +18,7 @@ import {
   checkDebugEndpoint,
   checkPageResponsive,
 } from "./browser/health.js";
+import { requiresPersonalChromeApproval } from "./browser/chrome-approval.js";
 import {
   markChromeRestartDone,
   waitForChromeRestartApproval,
@@ -79,6 +80,7 @@ async function main(): Promise<void> {
     return;
   }
 
+  let recoveryRetries = 0;
   for (
     let attempt = config.attempt;
     attempt <= config.maxAttempts;
@@ -96,6 +98,14 @@ async function main(): Promise<void> {
     try {
       const result = await runAttempt(config, logger, args.runDir);
       if (result === "needs_user") return;
+      if (result === "retry") {
+        recoveryRetries += 1;
+        if (recoveryRetries > 1) {
+          throw new Error("Recovery retry limit exceeded");
+        }
+        attempt -= 1;
+        continue;
+      }
       if (result === "completed") return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -121,7 +131,7 @@ async function runAttempt(
   config: RunConfig,
   logger: (msg: string) => void,
   runDir: string,
-): Promise<"completed" | "needs_user"> {
+): Promise<"completed" | "needs_user" | "retry"> {
   let browser: import("puppeteer").Browser | null = null;
   let page: import("puppeteer").Page | null = null;
   let keepFirefoxAlive = false;
@@ -387,7 +397,10 @@ async function runAttempt(
     }
     logger(`[worker] runAttempt error: ${String(error)}`);
     try {
-      await attemptRecovery(config, browser, page, logger, runDir);
+      const recovered = await attemptRecovery(config, browser, page, logger, runDir);
+      if (recovered) {
+        return "retry";
+      }
     } catch (recoveryError) {
       if (recoveryError instanceof NeedsUserError) {
         return "needs_user";
@@ -433,12 +446,12 @@ async function attemptRecovery(
   page: import("puppeteer").Page | null,
   logger: (msg: string) => void,
   runDir: string,
-): Promise<void> {
+): Promise<boolean> {
   if (await isCanceled(runDir)) {
     await finalizeCanceled(config, logger, "Canceled during run");
-    return;
+    return false;
   }
-  if (!browser || !page) return;
+  if (!browser || !page) return false;
 
   await writeStatus(config, "running", "recovery", "checking browser health");
   logger("[recovery] health check");
@@ -460,7 +473,7 @@ async function attemptRecovery(
       logger(`[recovery] reload failed: ${String(error)}`);
     }
     if (runtime.ok && pageHealth.ok) {
-      return;
+      return false;
     }
     const postRuntime = await checkBrowserRuntime(browser);
     const postPage = await checkPageResponsive(page);
@@ -468,37 +481,44 @@ async function attemptRecovery(
       `[recovery] post-reload runtime=${postRuntime.ok} page=${postPage.ok}`,
     );
     if (postRuntime.ok && postPage.ok) {
-      return;
+      return false;
     }
   }
 
   if (config.browser !== "chrome") {
-    return;
+    return false;
   }
 
-  const reason = debug.ok
-    ? "Chrome unresponsive; approval required to restart"
-    : "Chrome debug endpoint unreachable; approval required to restart";
-  await writeNeedsUser(
-    config,
-    "chrome_restart_approval",
-    reason,
-    "recovery",
-  );
-  const approval = await waitForChromeRestartApproval({
-    runId: config.runId,
-    logger,
-    onStatus: async (message) => {
-      await writeNeedsUser(config, "chrome_restart_approval", message, "recovery");
-    },
-    isCanceled: async () => isCanceled(runDir),
-  });
-  if (approval.action === "canceled") {
-    throw new CancelError("Canceled by user");
-  }
-  if (approval.action === "done") {
-    logger("[recovery] chrome restart already completed by another run");
-    return;
+  let approval: { action: "restart" | "done" | "canceled"; approvedAt?: number } = {
+    action: "restart",
+  };
+  if (requiresPersonalChromeApproval(config.profile.userDataDir)) {
+    const reason = debug.ok
+      ? "Personal Chrome unresponsive; approval required to restart"
+      : "Personal Chrome debug endpoint unreachable; approval required to restart";
+    await writeNeedsUser(
+      config,
+      "chrome_restart_approval",
+      reason,
+      "recovery",
+    );
+    approval = await waitForChromeRestartApproval({
+      runId: config.runId,
+      notifyTitle: "Approve personal Chrome restart",
+      notifyMessage: `Oracle run ${config.runId} needs to restart your personal Chrome to continue.`,
+      logger,
+      onStatus: async (message) => {
+        await writeNeedsUser(config, "chrome_restart_approval", message, "recovery");
+      },
+      isCanceled: async () => isCanceled(runDir),
+    });
+    if (approval.action === "canceled") {
+      throw new CancelError("Canceled by user");
+    }
+    if (approval.action === "done") {
+      logger("[recovery] chrome restart already completed by another run");
+      return true;
+    }
   }
   await writeStatus(
     config,
@@ -532,17 +552,23 @@ async function attemptRecovery(
     }
   }
   if (!terminated) {
-    await writeNeedsUser(
-      config,
-      "chrome_restart_approval",
-      "Chrome restart failed; allow-kill required to force quit",
-      "recovery",
-    );
-    throw new NeedsUserError("kill_chrome", "Chrome restart failed");
+    if (requiresPersonalChromeApproval(config.profile.userDataDir)) {
+      await writeNeedsUser(
+        config,
+        "chrome_restart_approval",
+        "Personal Chrome restart failed; allow-kill required to force quit",
+        "recovery",
+      );
+      throw new NeedsUserError("chrome_restart_approval", "Chrome restart failed");
+    }
+    throw new Error("Chrome restart failed");
   }
-  await markChromeRestartDone({
-    approvedAt: approval.action === "restart" ? approval.approvedAt : undefined,
-  });
+  if (requiresPersonalChromeApproval(config.profile.userDataDir)) {
+    await markChromeRestartDone({
+      approvedAt: approval.action === "restart" ? approval.approvedAt : undefined,
+    });
+  }
+  return true;
 }
 
 async function openDefaultChrome(logger: (msg: string) => void): Promise<void> {
