@@ -19,6 +19,10 @@ import {
   checkPageResponsive,
 } from "./browser/health.js";
 import {
+  markChromeRestartDone,
+  waitForChromeRestartApproval,
+} from "./notifications/chrome-restart.js";
+import {
   DEFAULT_BASE_URL,
   FALLBACK_BASE_URL,
   ensureChatGptReady,
@@ -472,15 +476,29 @@ async function attemptRecovery(
     return;
   }
 
-  if (!config.allowKill) {
-    const reason = debug.ok
-      ? "Chrome unresponsive; allow-kill required to restart"
-      : "Chrome debug endpoint unreachable; allow-kill required to restart";
-    await writeNeedsUser(config, "kill_chrome", reason, "recovery");
-    throw new NeedsUserError(
-      "kill_chrome",
-      "Chrome stuck; requires user approval",
-    );
+  const reason = debug.ok
+    ? "Chrome unresponsive; approval required to restart"
+    : "Chrome debug endpoint unreachable; approval required to restart";
+  await writeNeedsUser(
+    config,
+    "chrome_restart_approval",
+    reason,
+    "recovery",
+  );
+  const approval = await waitForChromeRestartApproval({
+    runId: config.runId,
+    logger,
+    onStatus: async (message) => {
+      await writeNeedsUser(config, "chrome_restart_approval", message, "recovery");
+    },
+    isCanceled: async () => isCanceled(runDir),
+  });
+  if (approval.action === "canceled") {
+    throw new CancelError("Canceled by user");
+  }
+  if (approval.action === "done") {
+    logger("[recovery] chrome restart already completed by another run");
+    return;
   }
   await writeStatus(
     config,
@@ -493,10 +511,11 @@ async function attemptRecovery(
     config.browser === "chrome"
       ? await isDefaultChromeRunning(config.profile.userDataDir)
       : false;
+  let terminated = true;
   if (config.browserPid) {
     const pid = config.browserPid;
     logger(`[recovery] attempting graceful shutdown for chrome pid ${pid}`);
-    const terminated = await shutdownChromePid(pid, logger);
+    terminated = await shutdownChromePid(pid, logger);
     if (!terminated) {
       logger(
         `[recovery] chrome pid ${pid} did not exit after graceful shutdown`,
@@ -512,6 +531,18 @@ async function attemptRecovery(
       await openDefaultChrome(logger);
     }
   }
+  if (!terminated) {
+    await writeNeedsUser(
+      config,
+      "chrome_restart_approval",
+      "Chrome restart failed; allow-kill required to force quit",
+      "recovery",
+    );
+    throw new NeedsUserError("kill_chrome", "Chrome restart failed");
+  }
+  await markChromeRestartDone({
+    approvedAt: approval.action === "restart" ? approval.approvedAt : undefined,
+  });
 }
 
 async function openDefaultChrome(logger: (msg: string) => void): Promise<void> {
@@ -538,6 +569,10 @@ async function shutdownChromePid(
   while (Date.now() - start < timeoutMs) {
     if (!isProcessAlive(pid)) return true;
     await sleep(250);
+  }
+  if (process.env.ORACLE_FORCE_KILL !== "1") {
+    logger("[recovery] chrome pid still alive; skipping SIGKILL (ORACLE_FORCE_KILL=1 to enable)");
+    return false;
   }
   logger(`[recovery] force killing chrome pid ${pid}`);
   try {

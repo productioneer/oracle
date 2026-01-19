@@ -88,6 +88,7 @@ export type StatusPayload = {
       | "login"
       | "cloudflare"
       | "kill_chrome"
+      | "chrome_restart_approval"
       | "profile"
       | "firefox_app"
       | "unknown";
