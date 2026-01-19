@@ -22,6 +22,8 @@ import { oracleChromeDataDir } from "./browser/profiles.js";
 import {
   isPersonalChromeRunning,
   listPersonalChromePids,
+  openPersonalChrome,
+  shouldRestartPersonalChrome,
 } from "./browser/personal-chrome.js";
 import {
   markChromeRestartDone,
@@ -581,11 +583,21 @@ async function attemptRecovery(
     throw new Error("Chrome restart failed");
   }
   if (approval && approval.action === "restart") {
-    const personalPids = await listPersonalChromePids(oracleUserDataDir);
-    if (personalPids.length) {
-      for (const pid of personalPids) {
-        logger(`[recovery] attempting graceful shutdown for personal chrome pid ${pid}`);
+    const personalPidsBefore = await listPersonalChromePids(oracleUserDataDir);
+    if (personalPidsBefore.length) {
+      for (const pid of personalPidsBefore) {
+        logger(
+          `[recovery] attempting graceful shutdown for personal chrome pid ${pid}`,
+        );
         await shutdownChromePid(pid, logger, 10_000, true);
+      }
+    }
+    const personalPidsAfter = await listPersonalChromePids(oracleUserDataDir);
+    if (shouldRestartPersonalChrome(personalPidsBefore, personalPidsAfter)) {
+      try {
+        await openPersonalChrome(logger);
+      } catch (error) {
+        logger(`[recovery] failed to reopen personal chrome: ${String(error)}`);
       }
     }
     await markChromeRestartDone({

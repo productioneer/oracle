@@ -32,3 +32,23 @@ export async function isPersonalChromeRunning(
   const pids = await listPersonalChromePids(oracleUserDataDir);
   return pids.length > 0;
 }
+
+export async function openPersonalChrome(
+  logger?: (message: string) => void,
+): Promise<void> {
+  if (process.platform !== "darwin") {
+    logger?.("[personal-chrome] open skipped; unsupported platform");
+    return;
+  }
+  const { spawn } = await import("child_process");
+  const args = ["-g", "-a", "Google Chrome"];
+  logger?.(`[personal-chrome] launching: open ${args.join(" ")}`);
+  spawn("open", args, { stdio: "ignore", detached: true }).unref();
+}
+
+export function shouldRestartPersonalChrome(
+  pidsBefore: number[],
+  pidsAfter: number[],
+): boolean {
+  return pidsBefore.length > 0 && pidsAfter.length === 0;
+}
