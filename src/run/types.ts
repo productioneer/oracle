@@ -1,38 +1,50 @@
-import type { FocusStatus } from '../browser/focus.js';
-import type { FirefoxAppConfig } from '../browser/firefox-app.js';
+import type { FocusStatus } from "../browser/focus.js";
+import type { FirefoxAppConfig } from "../browser/firefox-app.js";
 
-export type BrowserType = 'chrome' | 'firefox';
+export type BrowserType = "chrome" | "firefox";
 
 export type RunState =
-  | 'starting'
-  | 'running'
-  | 'needs_user'
-  | 'completed'
-  | 'failed'
-  | 'canceled';
+  | "starting"
+  | "running"
+  | "needs_user"
+  | "completed"
+  | "failed"
+  | "canceled";
 
 export type RunStage =
-  | 'init'
-  | 'launch'
-  | 'login'
-  | 'navigate'
-  | 'submit'
-  | 'waiting'
-  | 'extract'
-  | 'recovery'
-  | 'cleanup';
+  | "init"
+  | "launch"
+  | "login"
+  | "navigate"
+  | "submit"
+  | "waiting"
+  | "extract"
+  | "recovery"
+  | "cleanup";
 
 export type ProfileConfig = {
-  kind: 'chrome' | 'firefox';
+  kind: "chrome" | "firefox";
   userDataDir: string;
   profileDir?: string;
+};
+
+export type Attachment = {
+  /** Absolute path to the file on disk */
+  path: string;
+  /** Filename only (for privacy - no path info) */
+  displayName: string;
 };
 
 export type RunConfig = {
   runId: string;
   createdAt: string;
+  /** Prompt with @file references replaced by display names */
   prompt: string;
+  /** Original prompt before @file replacement (if any) */
+  originalPrompt?: string;
   promptHash: string;
+  /** Files to upload, parsed from @file references */
+  attachments?: Attachment[];
   browser: BrowserType;
   profile: ProfileConfig;
   headless: false;
@@ -41,7 +53,7 @@ export type RunConfig = {
   allowKill: boolean;
   pollMs: number;
   timeoutMs: number;
-  thinking: 'standard' | 'extended';
+  thinking: "standard" | "extended";
   debugPort?: number;
   browserPid?: number;
   conversationUrl?: string;
@@ -72,7 +84,13 @@ export type StatusPayload = {
   attempt: number;
   conversationUrl?: string;
   needs?: {
-    type: 'login' | 'cloudflare' | 'kill_chrome' | 'profile' | 'firefox_app' | 'unknown';
+    type:
+      | "login"
+      | "cloudflare"
+      | "kill_chrome"
+      | "profile"
+      | "firefox_app"
+      | "unknown";
     details?: string;
   };
   focus?: FocusStatus;
@@ -80,7 +98,7 @@ export type StatusPayload = {
 
 export type ResultPayload = {
   runId: string;
-  state: 'completed' | 'failed' | 'canceled';
+  state: "completed" | "failed" | "canceled";
   completedAt: string;
   conversationUrl?: string;
   content?: string;

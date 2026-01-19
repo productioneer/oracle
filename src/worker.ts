@@ -1,10 +1,23 @@
-import fs from 'fs';
-import path from 'path';
-import { launchChrome, createHiddenPage } from './browser/chrome.js';
-import { launchFirefox, FirefoxProfileInUseError, cleanupAutomationProfile } from './browser/firefox.js';
-import { resolveFirefoxApp } from './browser/firefox-app.js';
-import { applyFocusStrategy, FIREFOX_SETUP_DELAY_MS, resizeFirefoxWindow, runFirefoxSetupPhase } from './browser/focus.js';
-import { checkBrowserRuntime, checkDebugEndpoint, checkPageResponsive } from './browser/health.js';
+import fs from "fs";
+import path from "path";
+import { launchChrome, createHiddenPage } from "./browser/chrome.js";
+import {
+  launchFirefox,
+  FirefoxProfileInUseError,
+  cleanupAutomationProfile,
+} from "./browser/firefox.js";
+import { resolveFirefoxApp } from "./browser/firefox-app.js";
+import {
+  applyFocusStrategy,
+  FIREFOX_SETUP_DELAY_MS,
+  resizeFirefoxWindow,
+  runFirefoxSetupPhase,
+} from "./browser/focus.js";
+import {
+  checkBrowserRuntime,
+  checkDebugEndpoint,
+  checkPageResponsive,
+} from "./browser/health.js";
 import {
   DEFAULT_BASE_URL,
   FALLBACK_BASE_URL,
@@ -19,14 +32,20 @@ import {
   waitForUserMessage,
   waitForCompletion,
   waitForPromptInput,
-} from './browser/chatgpt.js';
-import { saveResultJson, saveResultMarkdown, saveRunConfig, saveStatus } from './run/state.js';
-import type { RunConfig, StatusPayload } from './run/types.js';
-import { readJson, pathExists } from './utils/fs.js';
-import { createLogger } from './utils/log.js';
-import { nowIso, sleep } from './utils/time.js';
+} from "./browser/chatgpt.js";
+import { uploadAttachments } from "./browser/attachments.js";
+import {
+  saveResultJson,
+  saveResultMarkdown,
+  saveRunConfig,
+  saveStatus,
+} from "./run/state.js";
+import type { RunConfig, StatusPayload } from "./run/types.js";
+import { readJson, pathExists } from "./utils/fs.js";
+import { createLogger } from "./utils/log.js";
+import { nowIso, sleep } from "./utils/time.js";
 
-const CANCEL_FILE = 'cancel.json';
+const CANCEL_FILE = "cancel.json";
 class NeedsUserError extends Error {
   public readonly kind: string;
   constructor(kind: string, message: string) {
@@ -39,38 +58,52 @@ class CancelError extends Error {}
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args.runDir) {
-    throw new Error('worker requires --run-dir');
+    throw new Error("worker requires --run-dir");
   }
-  const runPath = path.join(args.runDir, 'run.json');
+  const runPath = path.join(args.runDir, "run.json");
   const config = await readJson<RunConfig>(runPath);
-  config.thinking = config.thinking ?? 'extended';
+  config.thinking = config.thinking ?? "extended";
   const logger = await createLogger(config.logPath);
 
   logger(`[worker] start run ${config.runId}`);
   config.startedAt = config.startedAt ?? nowIso();
   await saveRunConfig(config.runPath, config);
-  await writeStatus(config, 'starting', 'init', 'worker starting');
+  await writeStatus(config, "starting", "init", "worker starting");
 
   if (await isCanceled(args.runDir)) {
-    await finalizeCanceled(config, logger, 'Canceled before start');
+    await finalizeCanceled(config, logger, "Canceled before start");
     return;
   }
 
-  for (let attempt = config.attempt; attempt <= config.maxAttempts; attempt += 1) {
+  for (
+    let attempt = config.attempt;
+    attempt <= config.maxAttempts;
+    attempt += 1
+  ) {
     config.attempt = attempt;
     await saveRunConfig(config.runPath, config);
-    await writeStatus(config, 'running', 'launch', `attempt ${attempt} launching browser`);
+    await writeStatus(
+      config,
+      "running",
+      "launch",
+      `attempt ${attempt} launching browser`,
+    );
 
     try {
       const result = await runAttempt(config, logger, args.runDir);
-      if (result === 'needs_user') return;
-      if (result === 'completed') return;
+      if (result === "needs_user") return;
+      if (result === "completed") return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger(`[worker] attempt ${attempt} error: ${message}`);
       config.lastError = message;
       await saveRunConfig(config.runPath, config);
-      await writeStatus(config, 'running', 'cleanup', `attempt ${attempt} failed: ${message}`);
+      await writeStatus(
+        config,
+        "running",
+        "cleanup",
+        `attempt ${attempt} failed: ${message}`,
+      );
       if (attempt >= config.maxAttempts) {
         await finalizeFailed(config, logger, message);
         return;
@@ -80,12 +113,16 @@ async function main(): Promise<void> {
   }
 }
 
-async function runAttempt(config: RunConfig, logger: (msg: string) => void, runDir: string): Promise<'completed' | 'needs_user'> {
-  let browser: import('puppeteer').Browser | null = null;
-  let page: import('puppeteer').Page | null = null;
+async function runAttempt(
+  config: RunConfig,
+  logger: (msg: string) => void,
+  runDir: string,
+): Promise<"completed" | "needs_user"> {
+  let browser: import("puppeteer").Browser | null = null;
+  let page: import("puppeteer").Page | null = null;
   let keepFirefoxAlive = false;
   let firefoxApp = config.firefoxApp;
-  if (config.browser === 'firefox' && process.platform === 'darwin') {
+  if (config.browser === "firefox" && process.platform === "darwin") {
     try {
       firefoxApp = firefoxApp ?? resolveFirefoxApp();
       if (firefoxApp && !config.firefoxApp) {
@@ -94,14 +131,17 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await writeNeedsUser(config, 'firefox_app', message, 'launch');
-      throw new NeedsUserError('firefox_app', message);
+      await writeNeedsUser(config, "firefox_app", message, "launch");
+      throw new NeedsUserError("firefox_app", message);
     }
   }
-  const appName = config.browser === 'firefox' ? firefoxApp?.appName ?? 'Firefox' : 'Google Chrome';
+  const appName =
+    config.browser === "firefox"
+      ? (firefoxApp?.appName ?? "Firefox")
+      : "Google Chrome";
   let firefoxPid: number | undefined;
   try {
-    if (config.browser === 'chrome') {
+    if (config.browser === "chrome") {
       const connection = await launchChrome({
         userDataDir: config.profile.userDataDir,
         profileDir: config.profile.profileDir,
@@ -127,15 +167,17 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
         });
       } catch (error) {
         if (error instanceof FirefoxProfileInUseError) {
-          await writeNeedsUser(config, 'profile', error.message, 'launch');
-          throw new NeedsUserError('profile', error.message);
+          await writeNeedsUser(config, "profile", error.message, "launch");
+          throw new NeedsUserError("profile", error.message);
         }
         throw error;
       }
       browser = connection.browser;
       keepFirefoxAlive = connection.keepAlive;
       firefoxPid = connection.pid;
-      const setup = config.allowVisible ? null : await runFirefoxSetupPhase(appName, firefoxPid, logger);
+      const setup = config.allowVisible
+        ? null
+        : await runFirefoxSetupPhase(appName, firefoxPid, logger);
       if (setup?.focus) {
         config.focus = setup.focus;
       } else {
@@ -151,27 +193,41 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
         }
       }
       if (!firefoxPid && !config.allowVisible) {
-        config.focus = config.focus ?? { state: 'visible', reason: 'pid-mismatch' };
+        config.focus = config.focus ?? {
+          state: "visible",
+          reason: "pid-mismatch",
+        };
       }
       if (config.focus) {
         await saveRunConfig(config.runPath, config);
-        const focusMessage = buildFocusMessage(config.focus, config.allowVisible);
+        const focusMessage = buildFocusMessage(
+          config.focus,
+          config.allowVisible,
+        );
         if (focusMessage) {
-          await writeStatus(config, 'running', 'launch', focusMessage);
+          await writeStatus(config, "running", "launch", focusMessage);
         }
       }
       if (!config.allowVisible) {
         await sleep(FIREFOX_SETUP_DELAY_MS);
       }
       if (config.focusOnly) {
-        await finalizeFocusOnly(config, logger, 'focus-only completed');
-        return 'completed';
+        await finalizeFocusOnly(config, logger, "focus-only completed");
+        return "completed";
       }
       if (!config.allowVisible) {
-        const resizeWork = await resizeFirefoxWindow(appName, firefoxPid, 'work', logger);
+        const resizeWork = await resizeFirefoxWindow(
+          appName,
+          firefoxPid,
+          "work",
+          logger,
+        );
         mergeFocusNeeds(config, resizeWork.needsUser);
-        if (resizeWork.reason === 'window-mismatch' && !config.allowVisible) {
-          config.focus = config.focus ?? { state: 'visible', reason: 'window-mismatch' };
+        if (resizeWork.reason === "window-mismatch" && !config.allowVisible) {
+          config.focus = config.focus ?? {
+            state: "visible",
+            reason: "window-mismatch",
+          };
         }
         if (resizeWork.needsUser) {
           await saveRunConfig(config.runPath, config);
@@ -179,7 +235,7 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
       }
       page = await browser.newPage();
     }
-    if (config.browser === 'chrome') {
+    if (config.browser === "chrome") {
       const focusStatus = await applyFocusStrategy({
         browser: config.browser,
         allowVisible: config.allowVisible,
@@ -189,39 +245,46 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
       if (focusStatus) {
         config.focus = focusStatus;
         await saveRunConfig(config.runPath, config);
-        const focusMessage = buildFocusMessage(focusStatus, config.allowVisible);
+        const focusMessage = buildFocusMessage(
+          focusStatus,
+          config.allowVisible,
+        );
         if (focusMessage) {
-          await writeStatus(config, 'running', 'launch', focusMessage);
+          await writeStatus(config, "running", "launch", focusMessage);
         }
       }
     }
     if (!page) {
-      throw new Error('Failed to create browser page');
+      throw new Error("Failed to create browser page");
     }
     await ensureWideViewport(page);
     attachNetworkTracing(page, logger);
     await injectTextDocsCapture(page, logger);
 
     if (config.focusOnly) {
-      await finalizeFocusOnly(config, logger, 'focus-only completed');
-      return 'completed';
+      await finalizeFocusOnly(config, logger, "focus-only completed");
+      return "completed";
     }
 
-    await writeStatus(config, 'running', 'login', 'navigating to ChatGPT');
+    await writeStatus(config, "running", "login", "navigating to ChatGPT");
     await navigateWithFallback(page, config.baseUrl);
     await ensureWideViewport(page);
 
     const ready = await ensureChatGptReady(page);
     if (ready.needsCloudflare) {
-      await writeNeedsUser(config, 'cloudflare', 'Cloudflare challenge detected');
-      return 'needs_user';
+      await writeNeedsUser(
+        config,
+        "cloudflare",
+        "Cloudflare challenge detected",
+      );
+      return "needs_user";
     }
     if (!ready.loggedIn) {
-      await writeNeedsUser(config, 'login', 'Login required');
-      return 'needs_user';
+      await writeNeedsUser(config, "login", "Login required");
+      return "needs_user";
     }
 
-    await writeStatus(config, 'running', 'navigate', 'opening conversation');
+    await writeStatus(config, "running", "navigate", "opening conversation");
     if (config.conversationUrl) {
       await navigateToChat(page, config.conversationUrl);
     }
@@ -229,7 +292,7 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
     try {
       await waitForPromptInput(page);
     } catch (error) {
-      await captureDebugArtifacts(page, config, logger, 'prompt-input');
+      await captureDebugArtifacts(page, config, logger, "prompt-input");
       throw error;
     }
     await ensureWideViewport(page);
@@ -238,7 +301,7 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
       try {
         const updated = await setThinkingMode(page, config.thinking);
         if (!updated) {
-          logger('[thinking] toggle not available');
+          logger("[thinking] toggle not available");
         }
       } catch (error) {
         logger(`[thinking] toggle failed: ${String(error)}`);
@@ -246,14 +309,35 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
     }
 
     if (!(await promptAlreadySubmitted(page, config.prompt))) {
-      await writeStatus(config, 'running', 'submit', 'submitting prompt');
+      // Upload attachments if any
+      if (config.attachments && config.attachments.length > 0) {
+        await writeStatus(
+          config,
+          "running",
+          "submit",
+          `uploading ${config.attachments.length} file(s)`,
+        );
+        try {
+          await uploadAttachments(page, config.attachments);
+          logger(`[attachments] uploaded ${config.attachments.length} file(s)`);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          logger(`[attachments] upload failed: ${message}`);
+          throw error;
+        }
+      }
+
+      await writeStatus(config, "running", "submit", "submitting prompt");
       const typedValue = await submitPrompt(page, config.prompt);
       if (typedValue.trim() !== config.prompt.trim()) {
-        logger(`[prompt] mismatch typed="${typedValue}" expected="${config.prompt}"`);
+        logger(
+          `[prompt] mismatch typed="${typedValue}" expected="${config.prompt}"`,
+        );
       }
       const submitted = await waitForUserMessage(page, config.prompt, 8_000);
       if (!submitted) {
-        logger('[prompt] user message not detected; retrying submit');
+        logger("[prompt] user message not detected; retrying submit");
         await submitPrompt(page, config.prompt);
       }
       await sleep(1000);
@@ -261,48 +345,48 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
       await saveRunConfig(config.runPath, config);
     }
 
-    await writeStatus(config, 'running', 'waiting', 'awaiting response');
+    await writeStatus(config, "running", "waiting", "awaiting response");
     const completion = await waitForCompletionWithCancel(page, config, runDir);
 
     if (
-      config.baseUrl.includes('127.0.0.1') ||
-      config.baseUrl.includes('localhost') ||
-      process.env.ORACLE_CAPTURE_HTML === '1'
+      config.baseUrl.includes("127.0.0.1") ||
+      config.baseUrl.includes("localhost") ||
+      process.env.ORACLE_CAPTURE_HTML === "1"
     ) {
-      await captureDebugArtifacts(page, config, logger, 'completion');
+      await captureDebugArtifacts(page, config, logger, "completion");
     }
 
     config.conversationUrl = completion.conversationUrl;
     config.lastAssistantIndex = completion.assistantIndex;
     await saveRunConfig(config.runPath, config);
 
-    await writeStatus(config, 'running', 'extract', 'writing result');
+    await writeStatus(config, "running", "extract", "writing result");
     await saveResultMarkdown(config.resultPath, completion.content);
     await saveResultJson(config.resultJsonPath, {
       runId: config.runId,
-      state: 'completed',
+      state: "completed",
       completedAt: nowIso(),
       conversationUrl: completion.conversationUrl,
       content: completion.content,
     });
 
-    await writeStatus(config, 'completed', 'cleanup', 'completed');
+    await writeStatus(config, "completed", "cleanup", "completed");
     logger(`[worker] completed run ${config.runId}`);
-    return 'completed';
+    return "completed";
   } catch (error) {
     if (error instanceof NeedsUserError) {
-      return 'needs_user';
+      return "needs_user";
     }
     if (error instanceof CancelError) {
-      await finalizeCanceled(config, logger, 'Canceled by user');
-      return 'completed';
+      await finalizeCanceled(config, logger, "Canceled by user");
+      return "completed";
     }
     logger(`[worker] runAttempt error: ${String(error)}`);
     try {
       await attemptRecovery(config, browser, page, logger, runDir);
     } catch (recoveryError) {
       if (recoveryError instanceof NeedsUserError) {
-        return 'needs_user';
+        return "needs_user";
       }
       throw recoveryError;
     }
@@ -317,8 +401,8 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
     }
     if (browser) {
       try {
-        const keepAlive = config.browser === 'firefox' && keepFirefoxAlive;
-        if (config.browser === 'firefox' && keepAlive) {
+        const keepAlive = config.browser === "firefox" && keepFirefoxAlive;
+        if (config.browser === "firefox" && keepAlive) {
           if (!config.allowVisible) {
             await runFirefoxSetupPhase(appName, firefoxPid, logger);
           }
@@ -330,37 +414,44 @@ async function runAttempt(config: RunConfig, logger: (msg: string) => void, runD
         logger(`[worker] browser close failed: ${String(closeError)}`);
       }
     }
-    if (config.browser === 'firefox' && config.focusOnly && !keepFirefoxAlive) {
-      await cleanupAutomationProfile(config.profile.profileDir ?? config.profile.userDataDir, logger);
+    if (config.browser === "firefox" && config.focusOnly && !keepFirefoxAlive) {
+      await cleanupAutomationProfile(
+        config.profile.profileDir ?? config.profile.userDataDir,
+        logger,
+      );
     }
   }
 }
 
 async function attemptRecovery(
   config: RunConfig,
-  browser: import('puppeteer').Browser | null,
-  page: import('puppeteer').Page | null,
+  browser: import("puppeteer").Browser | null,
+  page: import("puppeteer").Page | null,
   logger: (msg: string) => void,
   runDir: string,
 ): Promise<void> {
   if (await isCanceled(runDir)) {
-    await finalizeCanceled(config, logger, 'Canceled during run');
+    await finalizeCanceled(config, logger, "Canceled during run");
     return;
   }
   if (!browser || !page) return;
 
-  await writeStatus(config, 'running', 'recovery', 'checking browser health');
-  logger('[recovery] health check');
-  const debug = config.debugPort ? await checkDebugEndpoint(config.debugPort) : { ok: true };
+  await writeStatus(config, "running", "recovery", "checking browser health");
+  logger("[recovery] health check");
+  const debug = config.debugPort
+    ? await checkDebugEndpoint(config.debugPort)
+    : { ok: true };
   const runtime = await checkBrowserRuntime(browser);
   const pageHealth = await checkPageResponsive(page);
 
-  logger(`[recovery] debug=${debug.ok} runtime=${runtime.ok} page=${pageHealth.ok}`);
+  logger(
+    `[recovery] debug=${debug.ok} runtime=${runtime.ok} page=${pageHealth.ok}`,
+  );
   if (debug.ok) {
     try {
       await page.evaluate(() => window.stop());
-      await page.reload({ waitUntil: 'domcontentloaded' });
-      logger('[recovery] reload ok');
+      await page.reload({ waitUntil: "domcontentloaded" });
+      logger("[recovery] reload ok");
     } catch (error) {
       logger(`[recovery] reload failed: ${String(error)}`);
     }
@@ -369,37 +460,54 @@ async function attemptRecovery(
     }
     const postRuntime = await checkBrowserRuntime(browser);
     const postPage = await checkPageResponsive(page);
-    logger(`[recovery] post-reload runtime=${postRuntime.ok} page=${postPage.ok}`);
+    logger(
+      `[recovery] post-reload runtime=${postRuntime.ok} page=${postPage.ok}`,
+    );
     if (postRuntime.ok && postPage.ok) {
       return;
     }
   }
 
-  if (config.browser !== 'chrome') {
+  if (config.browser !== "chrome") {
     return;
   }
 
   if (!config.allowKill) {
     const reason = debug.ok
-      ? 'Chrome unresponsive; allow-kill required to restart'
-      : 'Chrome debug endpoint unreachable; allow-kill required to restart';
-    await writeNeedsUser(config, 'kill_chrome', reason, 'recovery');
-    throw new NeedsUserError('kill_chrome', 'Chrome stuck; requires user approval');
+      ? "Chrome unresponsive; allow-kill required to restart"
+      : "Chrome debug endpoint unreachable; allow-kill required to restart";
+    await writeNeedsUser(config, "kill_chrome", reason, "recovery");
+    throw new NeedsUserError(
+      "kill_chrome",
+      "Chrome stuck; requires user approval",
+    );
   }
-  await writeStatus(config, 'running', 'recovery', 'Chrome stuck; restarting browser');
+  await writeStatus(
+    config,
+    "running",
+    "recovery",
+    "Chrome stuck; restarting browser",
+  );
 
-  const hadDefaultChrome = config.browser === 'chrome' ? await isDefaultChromeRunning(config.profile.userDataDir) : false;
+  const hadDefaultChrome =
+    config.browser === "chrome"
+      ? await isDefaultChromeRunning(config.profile.userDataDir)
+      : false;
   if (config.browserPid) {
     const pid = config.browserPid;
     logger(`[recovery] attempting graceful shutdown for chrome pid ${pid}`);
     const terminated = await shutdownChromePid(pid, logger);
     if (!terminated) {
-      logger(`[recovery] chrome pid ${pid} did not exit after graceful shutdown`);
+      logger(
+        `[recovery] chrome pid ${pid} did not exit after graceful shutdown`,
+      );
     }
   }
 
-  if (config.browser === 'chrome' && config.browserPid && hadDefaultChrome) {
-    const stillRunning = await isDefaultChromeRunning(config.profile.userDataDir);
+  if (config.browser === "chrome" && config.browserPid && hadDefaultChrome) {
+    const stillRunning = await isDefaultChromeRunning(
+      config.profile.userDataDir,
+    );
     if (!stillRunning) {
       await openDefaultChrome(logger);
     }
@@ -407,15 +515,22 @@ async function attemptRecovery(
 }
 
 async function openDefaultChrome(logger: (msg: string) => void): Promise<void> {
-  logger('[recovery] opening default Chrome for user');
-  const { spawn } = await import('child_process');
-  spawn('open', ['-a', 'Google Chrome'], { stdio: 'ignore', detached: true }).unref();
+  logger("[recovery] opening default Chrome for user");
+  const { spawn } = await import("child_process");
+  spawn("open", ["-a", "Google Chrome"], {
+    stdio: "ignore",
+    detached: true,
+  }).unref();
 }
 
-async function shutdownChromePid(pid: number, logger: (msg: string) => void, timeoutMs = 10_000): Promise<boolean> {
+async function shutdownChromePid(
+  pid: number,
+  logger: (msg: string) => void,
+  timeoutMs = 10_000,
+): Promise<boolean> {
   if (!isProcessAlive(pid)) return true;
   try {
-    process.kill(pid, 'SIGTERM');
+    process.kill(pid, "SIGTERM");
   } catch (error) {
     logger(`[recovery] graceful shutdown failed: ${String(error)}`);
   }
@@ -426,7 +541,7 @@ async function shutdownChromePid(pid: number, logger: (msg: string) => void, tim
   }
   logger(`[recovery] force killing chrome pid ${pid}`);
   try {
-    process.kill(pid, 'SIGKILL');
+    process.kill(pid, "SIGKILL");
   } catch (error) {
     logger(`[recovery] force kill failed: ${String(error)}`);
   }
@@ -442,7 +557,12 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-async function writeStatus(config: RunConfig, state: StatusPayload['state'], stage: StatusPayload['stage'], message?: string): Promise<void> {
+async function writeStatus(
+  config: RunConfig,
+  state: StatusPayload["state"],
+  stage: StatusPayload["stage"],
+  message?: string,
+): Promise<void> {
   await saveStatus(config.statusPath, {
     runId: config.runId,
     state,
@@ -457,13 +577,13 @@ async function writeStatus(config: RunConfig, state: StatusPayload['state'], sta
 
 async function writeNeedsUser(
   config: RunConfig,
-  type: NonNullable<StatusPayload['needs']>['type'],
+  type: NonNullable<StatusPayload["needs"]>["type"],
   details: string,
-  stage: StatusPayload['stage'] = 'login',
+  stage: StatusPayload["stage"] = "login",
 ): Promise<void> {
   await saveStatus(config.statusPath, {
     runId: config.runId,
-    state: 'needs_user',
+    state: "needs_user",
     stage,
     message: details,
     updatedAt: nowIso(),
@@ -474,7 +594,10 @@ async function writeNeedsUser(
   });
 }
 
-async function navigateWithFallback(page: import('puppeteer').Page, baseUrl: string): Promise<void> {
+async function navigateWithFallback(
+  page: import("puppeteer").Page,
+  baseUrl: string,
+): Promise<void> {
   try {
     await navigateToChat(page, baseUrl);
   } catch (error) {
@@ -483,40 +606,59 @@ async function navigateWithFallback(page: import('puppeteer').Page, baseUrl: str
   }
 }
 
-async function promptAlreadySubmitted(page: import('puppeteer').Page, prompt: string): Promise<boolean> {
+async function promptAlreadySubmitted(
+  page: import("puppeteer").Page,
+  prompt: string,
+): Promise<boolean> {
   const trimmed = prompt.trim();
   return page.evaluate((needle) => {
-    const nodes = Array.from(document.querySelectorAll('[data-message-author-role="user"]')) as HTMLElement[];
+    const nodes = Array.from(
+      document.querySelectorAll('[data-message-author-role="user"]'),
+    ) as HTMLElement[];
     if (nodes.length) {
-      return nodes.some((node) => (node.innerText || '').trim() === needle);
+      return nodes.some((node) => (node.innerText || "").trim() === needle);
     }
-    const main = (document.querySelector('main') as HTMLElement | null) ?? (document.querySelector('[role="main"]') as HTMLElement | null);
-    const haystack = (main?.innerText ?? document.body?.innerText ?? '').trim();
+    const main =
+      (document.querySelector("main") as HTMLElement | null) ??
+      (document.querySelector('[role="main"]') as HTMLElement | null);
+    const haystack = (main?.innerText ?? document.body?.innerText ?? "").trim();
     return haystack.includes(needle);
   }, trimmed);
 }
 
 async function captureDebugArtifacts(
-  page: import('puppeteer').Page,
+  page: import("puppeteer").Page,
   config: RunConfig,
   logger: (msg: string) => void,
   label: string,
 ): Promise<void> {
   try {
-    const debugDir = path.join(config.outDir, 'debug');
+    const debugDir = path.join(config.outDir, "debug");
     await fs.promises.mkdir(debugDir, { recursive: true });
-    const html = await page.content().catch(() => '');
+    const html = await page.content().catch(() => "");
     const url = page.url();
     const meta = { url, capturedAt: nowIso(), label };
-    await fs.promises.writeFile(path.join(debugDir, `${label}.html`), html, 'utf8');
-    await fs.promises.writeFile(path.join(debugDir, `${label}.json`), JSON.stringify(meta, null, 2), 'utf8');
-    await page.screenshot({ path: path.join(debugDir, `${label}.png`) }).catch(() => null);
+    await fs.promises.writeFile(
+      path.join(debugDir, `${label}.html`),
+      html,
+      "utf8",
+    );
+    await fs.promises.writeFile(
+      path.join(debugDir, `${label}.json`),
+      JSON.stringify(meta, null, 2),
+      "utf8",
+    );
+    await page
+      .screenshot({ path: path.join(debugDir, `${label}.png`) })
+      .catch(() => null);
     const diagnostics = await page
       .evaluate(() => {
-        const main = document.querySelector('main') as HTMLElement | null;
-        const roleMain = document.querySelector('[role="main"]') as HTMLElement | null;
-        const testIds = Array.from(document.querySelectorAll('[data-testid]'))
-          .map((el) => el.getAttribute('data-testid') || '')
+        const main = document.querySelector("main") as HTMLElement | null;
+        const roleMain = document.querySelector(
+          '[role="main"]',
+        ) as HTMLElement | null;
+        const testIds = Array.from(document.querySelectorAll("[data-testid]"))
+          .map((el) => el.getAttribute("data-testid") || "")
           .filter(Boolean);
         const testIdCounts: Record<string, number> = {};
         for (const id of testIds) {
@@ -526,18 +668,20 @@ async function captureDebugArtifacts(
           .sort((a, b) => b[1] - a[1])
           .slice(0, 40)
           .map(([id, count]) => ({ id, count }));
-        const buttonLabels = Array.from(document.querySelectorAll('button'))
+        const buttonLabels = Array.from(document.querySelectorAll("button"))
           .map((button) => (button as HTMLButtonElement).innerText.trim())
           .filter(Boolean)
           .slice(0, 40);
         return {
           title: document.title,
           url: window.location.href,
-          mainText: main?.innerText ?? '',
-          roleMainText: roleMain?.innerText ?? '',
-          bodyText: document.body?.innerText ?? '',
-          articleCount: document.querySelectorAll('article').length,
-          messageAuthorCount: document.querySelectorAll('[data-message-author-role]').length,
+          mainText: main?.innerText ?? "",
+          roleMainText: roleMain?.innerText ?? "",
+          bodyText: document.body?.innerText ?? "",
+          articleCount: document.querySelectorAll("article").length,
+          messageAuthorCount: document.querySelectorAll(
+            "[data-message-author-role]",
+          ).length,
           topTestIds,
           buttonLabels,
         };
@@ -548,43 +692,51 @@ async function captureDebugArtifacts(
       await fs.promises.writeFile(
         path.join(debugDir, `${label}-diagnostics.json`),
         JSON.stringify(rest, null, 2),
-        'utf8',
+        "utf8",
       );
       if (mainText) {
         await fs.promises.writeFile(
           path.join(debugDir, `${label}-main.txt`),
           truncateText(mainText, 20000),
-          'utf8',
+          "utf8",
         );
       }
       if (roleMainText) {
         await fs.promises.writeFile(
           path.join(debugDir, `${label}-role-main.txt`),
           truncateText(roleMainText, 20000),
-          'utf8',
+          "utf8",
         );
       }
       if (bodyText) {
         await fs.promises.writeFile(
           path.join(debugDir, `${label}-body.txt`),
           truncateText(bodyText, 40000),
-          'utf8',
+          "utf8",
         );
       }
     }
-    if (label === 'completion') {
+    if (label === "completion") {
       const messageHtml = await page.evaluate(() => {
-        const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]')) as HTMLElement[];
+        const nodes = Array.from(
+          document.querySelectorAll('[data-message-author-role="assistant"]'),
+        ) as HTMLElement[];
         const last = nodes[nodes.length - 1];
-        return last?.outerHTML ?? '';
+        return last?.outerHTML ?? "";
       });
       if (messageHtml) {
-        await fs.promises.writeFile(path.join(debugDir, `${label}-assistant.html`), messageHtml, 'utf8');
+        await fs.promises.writeFile(
+          path.join(debugDir, `${label}-assistant.html`),
+          messageHtml,
+          "utf8",
+        );
       }
       const conversation = await page.evaluate(async () => {
         const match = window.location.pathname.match(/\/c\/([a-z0-9-]+)/i);
         if (!match) return null;
-        const response = await fetch(`/backend-api/conversation/${match[1]}`, { credentials: 'include' });
+        const response = await fetch(`/backend-api/conversation/${match[1]}`, {
+          credentials: "include",
+        });
         if (!response.ok) return { status: response.status };
         return await response.json();
       });
@@ -592,7 +744,7 @@ async function captureDebugArtifacts(
         await fs.promises.writeFile(
           path.join(debugDir, `${label}-conversation.json`),
           JSON.stringify(conversation, null, 2),
-          'utf8',
+          "utf8",
         );
       }
     }
@@ -606,34 +758,51 @@ function truncateText(text: string, maxChars: number): string {
   return text.slice(-maxChars);
 }
 
-async function maybeCaptureConversationUrl(page: import('puppeteer').Page, config: RunConfig): Promise<void> {
+async function maybeCaptureConversationUrl(
+  page: import("puppeteer").Page,
+  config: RunConfig,
+): Promise<void> {
   const url = page.url();
-  if (url.includes('/c/') || url.includes('/chat/') || url.includes('/conversation/')) {
+  if (
+    url.includes("/c/") ||
+    url.includes("/chat/") ||
+    url.includes("/conversation/")
+  ) {
     config.conversationUrl = url;
   }
 }
 
-function attachNetworkTracing(page: import('puppeteer').Page, logger: (msg: string) => void): void {
-  if (process.env.ORACLE_TRACE_NETWORK !== '1') return;
-  const shouldLog = (url: string) => /backend-api|conversation|event-stream/i.test(url);
-  page.on('response', (response) => {
+function attachNetworkTracing(
+  page: import("puppeteer").Page,
+  logger: (msg: string) => void,
+): void {
+  if (process.env.ORACLE_TRACE_NETWORK !== "1") return;
+  const shouldLog = (url: string) =>
+    /backend-api|conversation|event-stream/i.test(url);
+  page.on("response", (response) => {
     const url = response.url();
     if (!shouldLog(url)) return;
     const method = response.request().method();
     const status = response.status();
     logger(`[net] ${status} ${method} ${url}`);
   });
-  page.on('requestfailed', (request) => {
+  page.on("requestfailed", (request) => {
     const url = request.url();
     if (!shouldLog(url)) return;
-    logger(`[net] failed ${request.method()} ${url} ${request.failure()?.errorText ?? ''}`.trim());
+    logger(
+      `[net] failed ${request.method()} ${url} ${request.failure()?.errorText ?? ""}`.trim(),
+    );
   });
 }
 
-function buildFocusMessage(focus: NonNullable<RunConfig['focus']>, allowVisible: boolean): string | undefined {
-  if (focus.state === 'visible' && !allowVisible) {
-    if (focus.needsUser?.type) return `focus fallback: visible (${focus.needsUser.type})`;
-    return `focus fallback: ${focus.reason ?? 'visible'}`;
+function buildFocusMessage(
+  focus: NonNullable<RunConfig["focus"]>,
+  allowVisible: boolean,
+): string | undefined {
+  if (focus.state === "visible" && !allowVisible) {
+    if (focus.needsUser?.type)
+      return `focus fallback: visible (${focus.needsUser.type})`;
+    return `focus fallback: ${focus.reason ?? "visible"}`;
   }
   if (focus.needsUser?.type) {
     return `focus permissions: ${focus.needsUser.type}`;
@@ -641,10 +810,17 @@ function buildFocusMessage(focus: NonNullable<RunConfig['focus']>, allowVisible:
   return undefined;
 }
 
-function mergeFocusNeeds(config: RunConfig, needs?: NonNullable<RunConfig['focus']>['needsUser']): void {
+function mergeFocusNeeds(
+  config: RunConfig,
+  needs?: NonNullable<RunConfig["focus"]>["needsUser"],
+): void {
   if (!needs) return;
   if (!config.focus) {
-    config.focus = { state: 'visible', reason: 'focus-unknown', needsUser: needs };
+    config.focus = {
+      state: "visible",
+      reason: "focus-unknown",
+      needsUser: needs,
+    };
     return;
   }
   if (!config.focus.needsUser) {
@@ -652,7 +828,10 @@ function mergeFocusNeeds(config: RunConfig, needs?: NonNullable<RunConfig['focus
   }
 }
 
-async function injectTextDocsCapture(page: import('puppeteer').Page, logger: (msg: string) => void): Promise<void> {
+async function injectTextDocsCapture(
+  page: import("puppeteer").Page,
+  logger: (msg: string) => void,
+): Promise<void> {
   const script = () => {
     const globalAny = window as any;
     if (globalAny.__oracleFetchPatched) return;
@@ -662,8 +841,8 @@ async function injectTextDocsCapture(page: import('puppeteer').Page, logger: (ms
       const response = await originalFetch(...args);
       try {
         const input = args[0] as any;
-        const url = typeof input === 'string' ? input : input?.url ?? '';
-        if (url.includes('/textdocs')) {
+        const url = typeof input === "string" ? input : (input?.url ?? "");
+        if (url.includes("/textdocs")) {
           const clone = response.clone();
           clone
             .json()
@@ -689,20 +868,22 @@ async function injectTextDocsCapture(page: import('puppeteer').Page, logger: (ms
 }
 
 async function waitForCompletionWithCancel(
-  page: import('puppeteer').Page,
+  page: import("puppeteer").Page,
   config: RunConfig,
   runDir: string,
-): Promise<import('./browser/chatgpt.js').WaitForCompletionResult> {
+): Promise<import("./browser/chatgpt.js").WaitForCompletionResult> {
   let done = false;
   const heartbeatTimer = setInterval(() => {
     if (done) return;
-    writeStatus(config, 'running', 'waiting', 'awaiting response').catch(() => null);
+    writeStatus(config, "running", "waiting", "awaiting response").catch(
+      () => null,
+    );
   }, 30_000);
   heartbeatTimer.unref?.();
   const cancelWatcher = (async () => {
     while (!done) {
       if (await isCanceled(runDir)) {
-        throw new CancelError('Canceled by user');
+        throw new CancelError("Canceled by user");
       }
       await sleep(1000);
     }
@@ -749,15 +930,26 @@ async function waitForCompletionWithCancel(
   }
 }
 
-async function refreshAfterStall(page: import('puppeteer').Page, config: RunConfig): Promise<void> {
-  await writeStatus(config, 'running', 'recovery', 'refreshing after stalled response');
-  await page.reload({ waitUntil: 'domcontentloaded' });
+async function refreshAfterStall(
+  page: import("puppeteer").Page,
+  config: RunConfig,
+): Promise<void> {
+  await writeStatus(
+    config,
+    "running",
+    "recovery",
+    "refreshing after stalled response",
+  );
+  await page.reload({ waitUntil: "domcontentloaded" });
   await ensureWideViewport(page);
   await sleep(1000);
 }
 
-async function resubmitPrompt(page: import('puppeteer').Page, config: RunConfig): Promise<void> {
-  await writeStatus(config, 'running', 'submit', 'resubmitting prompt');
+async function resubmitPrompt(
+  page: import("puppeteer").Page,
+  config: RunConfig,
+): Promise<void> {
+  await writeStatus(config, "running", "submit", "resubmitting prompt");
   await waitForPromptInput(page);
   const typedValue = await submitPrompt(page, config.prompt);
   if (typedValue.trim() !== config.prompt.trim()) {
@@ -774,40 +966,52 @@ async function isCanceled(runDir: string): Promise<boolean> {
   return pathExists(path.join(runDir, CANCEL_FILE));
 }
 
-async function finalizeCanceled(config: RunConfig, logger: (msg: string) => void, message: string): Promise<void> {
+async function finalizeCanceled(
+  config: RunConfig,
+  logger: (msg: string) => void,
+  message: string,
+): Promise<void> {
   await saveResultJson(config.resultJsonPath, {
     runId: config.runId,
-    state: 'canceled',
+    state: "canceled",
     completedAt: nowIso(),
     conversationUrl: config.conversationUrl,
     error: message,
   });
-  await writeStatus(config, 'canceled', 'cleanup', message);
+  await writeStatus(config, "canceled", "cleanup", message);
   logger(`[worker] canceled: ${message}`);
 }
 
-async function finalizeFailed(config: RunConfig, logger: (msg: string) => void, message: string): Promise<void> {
+async function finalizeFailed(
+  config: RunConfig,
+  logger: (msg: string) => void,
+  message: string,
+): Promise<void> {
   await saveResultJson(config.resultJsonPath, {
     runId: config.runId,
-    state: 'failed',
+    state: "failed",
     completedAt: nowIso(),
     conversationUrl: config.conversationUrl,
     error: message,
   });
-  await writeStatus(config, 'failed', 'cleanup', message);
+  await writeStatus(config, "failed", "cleanup", message);
   logger(`[worker] failed: ${message}`);
 }
 
-async function finalizeFocusOnly(config: RunConfig, logger: (msg: string) => void, message: string): Promise<void> {
+async function finalizeFocusOnly(
+  config: RunConfig,
+  logger: (msg: string) => void,
+  message: string,
+): Promise<void> {
   await saveResultJson(config.resultJsonPath, {
     runId: config.runId,
-    state: 'completed',
+    state: "completed",
     completedAt: nowIso(),
     conversationUrl: config.conversationUrl,
-    content: '',
+    content: "",
   });
-  await saveResultMarkdown(config.resultPath, '');
-  await writeStatus(config, 'completed', 'cleanup', message);
+  await saveResultMarkdown(config.resultPath, "");
+  await writeStatus(config, "completed", "cleanup", message);
   logger(`[worker] completed focus-only run ${config.runId}`);
 }
 
@@ -815,7 +1019,7 @@ function parseArgs(argv: string[]): { runDir?: string } {
   const args: { runDir?: string } = {};
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
-    if (token === '--run-dir') {
+    if (token === "--run-dir") {
       args.runDir = argv[i + 1];
       i += 1;
     }
@@ -823,19 +1027,21 @@ function parseArgs(argv: string[]): { runDir?: string } {
   return args;
 }
 
-async function isDefaultChromeRunning(oracleUserDataDir: string): Promise<boolean> {
-  const { execFile } = await import('child_process');
+async function isDefaultChromeRunning(
+  oracleUserDataDir: string,
+): Promise<boolean> {
+  const { execFile } = await import("child_process");
   const output = await new Promise<string>((resolve) => {
-    execFile('ps', ['-ax', '-o', 'command='], (err, stdout) => {
-      if (err) return resolve('');
+    execFile("ps", ["-ax", "-o", "command="], (err, stdout) => {
+      if (err) return resolve("");
       resolve(stdout);
     });
   });
   const normalized = path.resolve(oracleUserDataDir);
   const lines = output.split(/\n/);
   for (const line of lines) {
-    if (!line.includes('Google Chrome')) continue;
-    if (line.includes('--type=')) continue;
+    if (!line.includes("Google Chrome")) continue;
+    if (line.includes("--type=")) continue;
     if (line.includes(`--user-data-dir=${normalized}`)) continue;
     return true;
   }
@@ -843,7 +1049,8 @@ async function isDefaultChromeRunning(oracleUserDataDir: string): Promise<boolea
 }
 
 main().catch((error) => {
-  const message = error instanceof Error ? error.stack ?? error.message : String(error);
+  const message =
+    error instanceof Error ? (error.stack ?? error.message) : String(error);
   // eslint-disable-next-line no-console
   console.error(message);
   process.exitCode = 1;
