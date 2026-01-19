@@ -18,7 +18,11 @@ import {
   checkDebugEndpoint,
   checkPageResponsive,
 } from "./browser/health.js";
-import { requiresPersonalChromeApproval } from "./browser/chrome-approval.js";
+import { oracleChromeDataDir } from "./browser/profiles.js";
+import {
+  isPersonalChromeRunning,
+  listPersonalChromePids,
+} from "./browser/personal-chrome.js";
 import {
   markChromeRestartDone,
   waitForChromeRestartApproval,
@@ -96,7 +100,7 @@ async function main(): Promise<void> {
     );
 
     try {
-      const result = await runAttempt(config, logger, args.runDir);
+      const result = await runAttempt(config, logger, args.runDir, recoveryRetries);
       if (result === "needs_user") return;
       if (result === "retry") {
         recoveryRetries += 1;
@@ -131,6 +135,7 @@ async function runAttempt(
   config: RunConfig,
   logger: (msg: string) => void,
   runDir: string,
+  recoveryAttempt: number,
 ): Promise<"completed" | "needs_user" | "retry"> {
   let browser: import("puppeteer").Browser | null = null;
   let page: import("puppeteer").Page | null = null;
@@ -397,7 +402,14 @@ async function runAttempt(
     }
     logger(`[worker] runAttempt error: ${String(error)}`);
     try {
-      const recovered = await attemptRecovery(config, browser, page, logger, runDir);
+      const recovered = await attemptRecovery(
+        config,
+        browser,
+        page,
+        logger,
+        runDir,
+        recoveryAttempt > 0,
+      );
       if (recovered) {
         return "retry";
       }
@@ -446,6 +458,7 @@ async function attemptRecovery(
   page: import("puppeteer").Page | null,
   logger: (msg: string) => void,
   runDir: string,
+  allowPersonalRestart: boolean,
 ): Promise<boolean> {
   if (await isCanceled(runDir)) {
     await finalizeCanceled(config, logger, "Canceled during run");
@@ -489,10 +502,16 @@ async function attemptRecovery(
     return false;
   }
 
-  let approval: { action: "restart" | "done" | "canceled"; approvedAt?: number } = {
-    action: "restart",
-  };
-  if (requiresPersonalChromeApproval(config.profile.userDataDir)) {
+  const oracleUserDataDir = oracleChromeDataDir();
+  const personalRunning = allowPersonalRestart
+    ? await isPersonalChromeRunning(oracleUserDataDir)
+    : false;
+  let approval:
+    | { action: "restart"; approvedAt?: number }
+    | { action: "done" }
+    | { action: "canceled" }
+    | null = null;
+  if (allowPersonalRestart && personalRunning) {
     const reason = debug.ok
       ? "Personal Chrome unresponsive; approval required to restart"
       : "Personal Chrome debug endpoint unreachable; approval required to restart";
@@ -508,7 +527,12 @@ async function attemptRecovery(
       notifyMessage: `Oracle run ${config.runId} needs to restart your personal Chrome to continue.`,
       logger,
       onStatus: async (message) => {
-        await writeNeedsUser(config, "chrome_restart_approval", message, "recovery");
+        await writeNeedsUser(
+          config,
+          "chrome_restart_approval",
+          message,
+          "recovery",
+        );
       },
       isCanceled: async () => isCanceled(runDir),
     });
@@ -516,7 +540,7 @@ async function attemptRecovery(
       throw new CancelError("Canceled by user");
     }
     if (approval.action === "done") {
-      logger("[recovery] chrome restart already completed by another run");
+      logger("[recovery] personal chrome restart already completed by another run");
       return true;
     }
   }
@@ -527,15 +551,16 @@ async function attemptRecovery(
     "Chrome stuck; restarting browser",
   );
 
-  const hadDefaultChrome =
-    config.browser === "chrome"
-      ? await isDefaultChromeRunning(config.profile.userDataDir)
-      : false;
   let terminated = true;
   if (config.browserPid) {
     const pid = config.browserPid;
     logger(`[recovery] attempting graceful shutdown for chrome pid ${pid}`);
-    terminated = await shutdownChromePid(pid, logger);
+    terminated = await shutdownChromePid(
+      pid,
+      logger,
+      10_000,
+      process.env.ORACLE_FORCE_KILL === "1",
+    );
     if (!terminated) {
       logger(
         `[recovery] chrome pid ${pid} did not exit after graceful shutdown`,
@@ -543,16 +568,8 @@ async function attemptRecovery(
     }
   }
 
-  if (config.browser === "chrome" && config.browserPid && hadDefaultChrome) {
-    const stillRunning = await isDefaultChromeRunning(
-      config.profile.userDataDir,
-    );
-    if (!stillRunning) {
-      await openDefaultChrome(logger);
-    }
-  }
   if (!terminated) {
-    if (requiresPersonalChromeApproval(config.profile.userDataDir)) {
+    if (allowPersonalRestart && personalRunning) {
       await writeNeedsUser(
         config,
         "chrome_restart_approval",
@@ -563,27 +580,26 @@ async function attemptRecovery(
     }
     throw new Error("Chrome restart failed");
   }
-  if (requiresPersonalChromeApproval(config.profile.userDataDir)) {
+  if (approval && approval.action === "restart") {
+    const personalPids = await listPersonalChromePids(oracleUserDataDir);
+    if (personalPids.length) {
+      for (const pid of personalPids) {
+        logger(`[recovery] attempting graceful shutdown for personal chrome pid ${pid}`);
+        await shutdownChromePid(pid, logger, 10_000, true);
+      }
+    }
     await markChromeRestartDone({
-      approvedAt: approval.action === "restart" ? approval.approvedAt : undefined,
+      approvedAt: approval.approvedAt,
     });
   }
   return true;
-}
-
-async function openDefaultChrome(logger: (msg: string) => void): Promise<void> {
-  logger("[recovery] opening default Chrome for user");
-  const { spawn } = await import("child_process");
-  spawn("open", ["-a", "Google Chrome"], {
-    stdio: "ignore",
-    detached: true,
-  }).unref();
 }
 
 async function shutdownChromePid(
   pid: number,
   logger: (msg: string) => void,
   timeoutMs = 10_000,
+  forceKill = false,
 ): Promise<boolean> {
   if (!isProcessAlive(pid)) return true;
   try {
@@ -596,7 +612,7 @@ async function shutdownChromePid(
     if (!isProcessAlive(pid)) return true;
     await sleep(250);
   }
-  if (process.env.ORACLE_FORCE_KILL !== "1") {
+  if (!forceKill) {
     logger("[recovery] chrome pid still alive; skipping SIGKILL (ORACLE_FORCE_KILL=1 to enable)");
     return false;
   }
@@ -1086,27 +1102,6 @@ function parseArgs(argv: string[]): { runDir?: string } {
     }
   }
   return args;
-}
-
-async function isDefaultChromeRunning(
-  oracleUserDataDir: string,
-): Promise<boolean> {
-  const { execFile } = await import("child_process");
-  const output = await new Promise<string>((resolve) => {
-    execFile("ps", ["-ax", "-o", "command="], (err, stdout) => {
-      if (err) return resolve("");
-      resolve(stdout);
-    });
-  });
-  const normalized = path.resolve(oracleUserDataDir);
-  const lines = output.split(/\n/);
-  for (const line of lines) {
-    if (!line.includes("Google Chrome")) continue;
-    if (line.includes("--type=")) continue;
-    if (line.includes(`--user-data-dir=${normalized}`)) continue;
-    return true;
-  }
-  return false;
 }
 
 main().catch((error) => {
