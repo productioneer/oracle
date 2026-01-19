@@ -1,15 +1,18 @@
-import fs from 'fs';
-import path from 'path';
-import puppeteer from 'puppeteer';
-import type { Browser } from 'puppeteer';
-import type { Logger } from '../utils/log.js';
-import { oracleFirefoxDataDir } from './profiles.js';
-import { FIREFOX_SETUP_WINDOW } from './focus.js';
-import { FIREFOX_HOME_FILENAME, FIREFOX_HOME_TITLE } from './firefox-constants.js';
-import type { WindowSize } from './focus.js';
-import { pathExists, readJson, writeJsonAtomic } from '../utils/fs.js';
-import { nowIso } from '../utils/time.js';
-import { pathToFileURL } from 'url';
+import fs from "fs";
+import path from "path";
+import puppeteer from "puppeteer";
+import type { Browser } from "puppeteer";
+import type { Logger } from "../utils/log.js";
+import { oracleFirefoxDataDir } from "./profiles.js";
+import { FIREFOX_SETUP_WINDOW } from "./focus.js";
+import {
+  FIREFOX_HOME_FILENAME,
+  FIREFOX_HOME_TITLE,
+} from "./firefox-constants.js";
+import type { WindowSize } from "./focus.js";
+import { pathExists, readJson, writeJsonAtomic } from "../utils/fs.js";
+import { nowIso } from "../utils/time.js";
+import { pathToFileURL } from "url";
 
 export type FirefoxLaunchOptions = {
   profilePath?: string;
@@ -31,21 +34,29 @@ export type FirefoxConnection = {
 export class FirefoxProfileInUseError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'FirefoxProfileInUseError';
+    this.name = "FirefoxProfileInUseError";
   }
 }
 
-export async function launchFirefox(options: FirefoxLaunchOptions): Promise<FirefoxConnection> {
+export async function launchFirefox(
+  options: FirefoxLaunchOptions,
+): Promise<FirefoxConnection> {
   const args: string[] = [];
   const ignoreDefaultArgs: string[] = [];
-  const resolvedProfile = path.resolve(options.profilePath ?? oracleFirefoxDataDir());
+  const resolvedProfile = path.resolve(
+    options.profilePath ?? oracleFirefoxDataDir(),
+  );
   await fs.promises.mkdir(resolvedProfile, { recursive: true });
-  args.push('-profile', resolvedProfile);
-  args.push('-no-remote');
+  args.push("-profile", resolvedProfile);
+  args.push("-no-remote");
 
-  if (!options.allowVisible && process.platform === 'darwin') {
+  if (!options.allowVisible && process.platform === "darwin") {
     await ensureFirefoxAutomationHome(resolvedProfile, options.logger);
-    await prepareFirefoxWindowSize(resolvedProfile, FIREFOX_SETUP_WINDOW, options.logger);
+    await prepareFirefoxWindowSize(
+      resolvedProfile,
+      FIREFOX_SETUP_WINDOW,
+      options.logger,
+    );
   }
 
   const reuse = options.reuse ?? !options.allowVisible;
@@ -54,21 +65,30 @@ export async function launchFirefox(options: FirefoxLaunchOptions): Promise<Fire
   if (reuse && (await pathExists(connectionPath))) {
     const existing = await loadFirefoxConnection(connectionPath);
     if (existing?.wsEndpoint && existing.profilePath === resolvedProfile) {
-      if (options.appPath && existing.appPath && existing.appPath !== options.appPath) {
-        options.logger?.('[firefox] reuse skipped (app mismatch)');
+      if (
+        options.appPath &&
+        existing.appPath &&
+        existing.appPath !== options.appPath
+      ) {
+        options.logger?.("[firefox] reuse skipped (app mismatch)");
         await fs.promises.unlink(connectionPath).catch(() => null);
       } else if (options.appPath && !existing.appPath) {
-        options.logger?.('[firefox] reuse skipped (missing app metadata)');
+        options.logger?.("[firefox] reuse skipped (missing app metadata)");
         await fs.promises.unlink(connectionPath).catch(() => null);
       } else {
         try {
-          options.logger?.('[firefox] reuse existing browser');
+          options.logger?.("[firefox] reuse existing browser");
           const browser = await puppeteer.connect({
             browserWSEndpoint: existing.wsEndpoint,
-            protocol: 'webDriverBiDi',
+            protocol: "webDriverBiDi",
           });
           try {
-            const pid = await requireFirefoxPid(existing.pid, resolvedProfile, options.logger, profileGuard);
+            const pid = await requireFirefoxPid(
+              existing.pid,
+              resolvedProfile,
+              options.logger,
+              profileGuard,
+            );
             return { browser, reused: true, keepAlive: true, pid };
           } catch (error) {
             await browser.disconnect().catch(() => null);
@@ -85,27 +105,34 @@ export async function launchFirefox(options: FirefoxLaunchOptions): Promise<Fire
     }
   }
   if (reuse) {
-    const pid = await findFirefoxAppPidByProfile(resolvedProfile, options.logger);
+    const pid = await findFirefoxAppPidByProfile(
+      resolvedProfile,
+      options.logger,
+    );
     const locked = await isFirefoxProfileLocked(resolvedProfile);
     if (pid || locked) {
-      const cleaned = await cleanupAutomationFirefox(pid, resolvedProfile, options.logger);
+      const cleaned = await cleanupAutomationFirefox(
+        pid,
+        resolvedProfile,
+        options.logger,
+      );
       if (!cleaned) {
         throw new FirefoxProfileInUseError(
-          `Firefox profile already in use (${pid ? `pid ${pid}` : 'lock file'}). Close the existing automation Firefox or remove the lock file in ${resolvedProfile}.`,
+          `Firefox profile already in use (${pid ? `pid ${pid}` : "lock file"}). Close the existing automation Firefox or remove the lock file in ${resolvedProfile}.`,
         );
       }
     }
   }
   if (!options.allowVisible) {
     // Best-effort: keep window in background; Firefox may still focus.
-    args.push('-new-instance');
-    if (process.platform === 'darwin') {
-      ignoreDefaultArgs.push('--foreground');
+    args.push("-new-instance");
+    if (process.platform === "darwin") {
+      ignoreDefaultArgs.push("--foreground");
     }
   }
-  options.logger?.(`[firefox] launch (bidi) args: ${args.join(' ')}`);
+  options.logger?.(`[firefox] launch (bidi) args: ${args.join(" ")}`);
   const browser = await puppeteer.launch({
-    browser: 'firefox',
+    browser: "firefox",
     headless: false,
     executablePath: options.executablePath,
     args,
@@ -113,7 +140,12 @@ export async function launchFirefox(options: FirefoxLaunchOptions): Promise<Fire
   });
   let pid: number;
   try {
-    pid = await requireFirefoxPid(browser.process()?.pid, resolvedProfile, options.logger, profileGuard);
+    pid = await requireFirefoxPid(
+      browser.process()?.pid,
+      resolvedProfile,
+      options.logger,
+      profileGuard,
+    );
   } catch (error) {
     await browser.close().catch(() => null);
     throw error;
@@ -132,7 +164,10 @@ export async function launchFirefox(options: FirefoxLaunchOptions): Promise<Fire
   return { browser, reused: false, keepAlive: reuse, pid };
 }
 
-export async function cleanupAutomationProfile(profilePath: string, logger?: Logger): Promise<void> {
+export async function cleanupAutomationProfile(
+  profilePath: string,
+  logger?: Logger,
+): Promise<void> {
   const pids = await findFirefoxAppPidsByProfile(profilePath, logger);
   for (const pid of pids) {
     await terminateFirefoxPid(pid, logger);
@@ -141,7 +176,7 @@ export async function cleanupAutomationProfile(profilePath: string, logger?: Log
   if (await pathExists(connectionPath)) {
     await fs.promises.unlink(connectionPath).catch(() => null);
   }
-  const lockFiles = ['parent.lock', '.parentlock', 'lock'];
+  const lockFiles = ["parent.lock", ".parentlock", "lock"];
   for (const lockFile of lockFiles) {
     const lockPath = path.join(profilePath, lockFile);
     if (await pathExists(lockPath)) {
@@ -155,12 +190,12 @@ export async function prepareFirefoxWindowSize(
   size: WindowSize,
   logger?: Logger,
 ): Promise<boolean> {
-  const xulstorePath = path.join(profilePath, 'xulstore.json');
+  const xulstorePath = path.join(profilePath, "xulstore.json");
   let data: Record<string, unknown> = {};
   if (await pathExists(xulstorePath)) {
     try {
       const parsed = await readJson<Record<string, unknown>>(xulstorePath);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         data = parsed;
       }
     } catch (error) {
@@ -177,7 +212,10 @@ export async function prepareFirefoxWindowSize(
   return updated.changed;
 }
 
-async function ensureFirefoxAutomationHome(profilePath: string, logger?: Logger): Promise<void> {
+async function ensureFirefoxAutomationHome(
+  profilePath: string,
+  logger?: Logger,
+): Promise<void> {
   const homePath = path.join(profilePath, FIREFOX_HOME_FILENAME);
   const homeUrl = pathToFileURL(homePath).toString();
   const html = `<!doctype html>
@@ -194,27 +232,35 @@ async function ensureFirefoxAutomationHome(profilePath: string, logger?: Logger)
 </body>
 </html>
 `;
-  const existing = (await pathExists(homePath)) ? await fs.promises.readFile(homePath, 'utf8') : '';
+  const existing = (await pathExists(homePath))
+    ? await fs.promises.readFile(homePath, "utf8")
+    : "";
   if (existing !== html) {
-    await fs.promises.writeFile(homePath, html, 'utf8');
+    await fs.promises.writeFile(homePath, html, "utf8");
   }
 
-  const userJsPath = path.join(profilePath, 'user.js');
+  const userJsPath = path.join(profilePath, "user.js");
   const prefs = [
     `user_pref("browser.startup.homepage", "${homeUrl}");`,
     'user_pref("browser.startup.page", 1);',
     'user_pref("browser.newtabpage.enabled", false);',
   ];
-  const prefKeys = ['browser.startup.homepage', 'browser.startup.page', 'browser.newtabpage.enabled'];
-  const raw = (await pathExists(userJsPath)) ? await fs.promises.readFile(userJsPath, 'utf8') : '';
+  const prefKeys = [
+    "browser.startup.homepage",
+    "browser.startup.page",
+    "browser.newtabpage.enabled",
+  ];
+  const raw = (await pathExists(userJsPath))
+    ? await fs.promises.readFile(userJsPath, "utf8")
+    : "";
   const filtered = raw
     .split(/\r?\n/)
     .filter((line) => !prefKeys.some((key) => line.includes(`"${key}"`)))
     .filter((line) => line.trim().length > 0);
-  const next = [...filtered, ...prefs].join('\n') + '\n';
+  const next = [...filtered, ...prefs].join("\n") + "\n";
   if (raw !== next) {
-    await fs.promises.writeFile(userJsPath, next, 'utf8');
-    logger?.('[firefox] wrote automation homepage prefs');
+    await fs.promises.writeFile(userJsPath, next, "utf8");
+    logger?.("[firefox] wrote automation homepage prefs");
   }
 }
 
@@ -223,10 +269,13 @@ type XulstoreUpdateResult = {
   changed: boolean;
 };
 
-const XULSTORE_BROWSER_KEY = 'chrome://browser/content/browser.xhtml';
-const XULSTORE_MAIN_WINDOW = 'main-window';
+const XULSTORE_BROWSER_KEY = "chrome://browser/content/browser.xhtml";
+const XULSTORE_MAIN_WINDOW = "main-window";
 
-function updateXulstoreWindow(data: Record<string, unknown>, size: WindowSize): XulstoreUpdateResult {
+function updateXulstoreWindow(
+  data: Record<string, unknown>,
+  size: WindowSize,
+): XulstoreUpdateResult {
   const root = { ...data };
   const browserEntry = readRecord(root[XULSTORE_BROWSER_KEY]);
   const windowEntry = readRecord(browserEntry[XULSTORE_MAIN_WINDOW]);
@@ -234,7 +283,7 @@ function updateXulstoreWindow(data: Record<string, unknown>, size: WindowSize): 
     ...windowEntry,
     width: String(size.width),
     height: String(size.height),
-    sizemode: 'normal',
+    sizemode: "normal",
   };
   const changed =
     windowEntry.width !== nextWindow.width ||
@@ -246,7 +295,7 @@ function updateXulstoreWindow(data: Record<string, unknown>, size: WindowSize): 
 }
 
 function readRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
 }
 
@@ -259,10 +308,12 @@ type FirefoxConnectionInfo = {
 };
 
 function firefoxConnectionPath(profilePath: string): string {
-  return path.join(profilePath, 'oracle-connection.json');
+  return path.join(profilePath, "oracle-connection.json");
 }
 
-async function loadFirefoxConnection(filePath: string): Promise<FirefoxConnectionInfo | null> {
+async function loadFirefoxConnection(
+  filePath: string,
+): Promise<FirefoxConnectionInfo | null> {
   try {
     return await readJson<FirefoxConnectionInfo>(filePath);
   } catch {
@@ -276,12 +327,18 @@ type ProcessInfo = {
   command: string;
 };
 
-async function findFirefoxAppPidByProfile(profilePath: string, logger?: Logger): Promise<number | undefined> {
+async function findFirefoxAppPidByProfile(
+  profilePath: string,
+  logger?: Logger,
+): Promise<number | undefined> {
   const pids = await findFirefoxAppPidsByProfile(profilePath, logger);
   return pids[0];
 }
 
-async function findFirefoxAppPidsByProfile(profilePath: string, logger?: Logger): Promise<number[]> {
+async function findFirefoxAppPidsByProfile(
+  profilePath: string,
+  logger?: Logger,
+): Promise<number[]> {
   const appPids = await listFirefoxAppPids();
   const matches: number[] = [];
   for (const pid of appPids) {
@@ -305,17 +362,17 @@ async function listFirefoxAppPids(): Promise<number[]> {
 
 function isFirefoxMainCommand(command: string): boolean {
   const lower = command.toLowerCase();
-  if (lower.includes('plugin-container')) return false;
-  if (lower.includes('crashhelper')) return false;
-  if (lower.includes('gpu-helper')) return false;
-  return lower.includes('/firefox');
+  if (lower.includes("plugin-container")) return false;
+  if (lower.includes("crashhelper")) return false;
+  if (lower.includes("gpu-helper")) return false;
+  return lower.includes("/firefox");
 }
 
 async function listProcessTable(): Promise<Map<number, ProcessInfo>> {
-  const { execFile } = await import('child_process');
+  const { execFile } = await import("child_process");
   const output = await new Promise<string>((resolve) => {
-    execFile('ps', ['-ax', '-o', 'pid=,ppid=,command='], (err, stdout) => {
-      if (err) return resolve('');
+    execFile("ps", ["-ax", "-o", "pid=,ppid=,command="], (err, stdout) => {
+      if (err) return resolve("");
       resolve(stdout);
     });
   });
@@ -341,7 +398,7 @@ async function resolveFirefoxPid(
   }
   const resolved = await findFirefoxAppPidByProfile(profilePath, logger);
   if (!resolved) {
-    logger?.('[firefox] profile pid resolution failed; skipping window ops');
+    logger?.("[firefox] profile pid resolution failed; skipping window ops");
   }
   return resolved;
 }
@@ -359,23 +416,27 @@ async function requireFirefoxPid(
   return validated;
 }
 
-async function isFirefoxPidUsingProfile(pid: number, profilePath: string, logger?: Logger): Promise<boolean> {
-  const { execFile } = await import('child_process');
+async function isFirefoxPidUsingProfile(
+  pid: number,
+  profilePath: string,
+  logger?: Logger,
+): Promise<boolean> {
+  const { execFile } = await import("child_process");
   const output = await new Promise<string>((resolve) => {
-    execFile('lsof', ['-p', String(pid)], (err, stdout) => {
-      if (err) return resolve('');
+    execFile("lsof", ["-p", String(pid)], (err, stdout) => {
+      if (err) return resolve("");
       resolve(stdout);
     });
   });
   if (!output) {
-    logger?.('[firefox] lsof failed; cannot validate profile');
+    logger?.("[firefox] lsof failed; cannot validate profile");
     return false;
   }
   return output.includes(profilePath);
 }
 
 async function isFirefoxProfileLocked(profilePath: string): Promise<boolean> {
-  const lockFiles = ['parent.lock', '.parentlock', 'lock'];
+  const lockFiles = ["parent.lock", ".parentlock", "lock"];
   for (const lockFile of lockFiles) {
     if (await pathExists(path.join(profilePath, lockFile))) return true;
   }
@@ -393,7 +454,7 @@ async function cleanupAutomationFirefox(
     const stopped = await terminateFirefoxPid(verifiedPid, logger);
     if (!stopped) return false;
   }
-  const lockFiles = ['parent.lock', '.parentlock', 'lock'];
+  const lockFiles = ["parent.lock", ".parentlock", "lock"];
   for (const lockFile of lockFiles) {
     const lockPath = path.join(profilePath, lockFile);
     if (await pathExists(lockPath)) {
@@ -403,9 +464,13 @@ async function cleanupAutomationFirefox(
   return true;
 }
 
-async function terminateFirefoxPid(pid: number, logger?: Logger, timeoutMs = 5_000): Promise<boolean> {
+async function terminateFirefoxPid(
+  pid: number,
+  logger?: Logger,
+  timeoutMs = 5_000,
+): Promise<boolean> {
   try {
-    process.kill(pid, 'SIGTERM');
+    process.kill(pid, "SIGTERM");
   } catch (error) {
     logger?.(`[firefox] terminate failed: ${String(error)}`);
   }
@@ -415,7 +480,7 @@ async function terminateFirefoxPid(pid: number, logger?: Logger, timeoutMs = 5_0
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   try {
-    process.kill(pid, 'SIGKILL');
+    process.kill(pid, "SIGKILL");
   } catch (error) {
     logger?.(`[firefox] kill failed: ${String(error)}`);
   }

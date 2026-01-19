@@ -1,14 +1,17 @@
-import type { RunConfig } from './types.js';
+import type { RunConfig } from "./types.js";
 
 export type RunOverrides = {
   allowVisible?: boolean;
   allowKill?: boolean;
   timeoutMs?: number;
   pollMs?: number;
-  thinking?: RunConfig['thinking'];
+  thinking?: RunConfig["thinking"];
 };
 
-export function applyRunOverrides(config: RunConfig, overrides: RunOverrides): RunConfig {
+export function applyRunOverrides(
+  config: RunConfig,
+  overrides: RunOverrides,
+): RunConfig {
   if (overrides.allowVisible !== undefined) {
     config.allowVisible = overrides.allowVisible;
   }

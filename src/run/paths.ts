@@ -1,8 +1,8 @@
-import os from 'os';
-import path from 'path';
+import os from "os";
+import path from "path";
 
 export function defaultRunsRoot(): string {
-  return path.join(os.homedir(), '.oracle', 'runs');
+  return path.join(os.homedir(), ".oracle", "runs");
 }
 
 export function runDir(runId: string, rootDir?: string): string {
@@ -10,21 +10,21 @@ export function runDir(runId: string, rootDir?: string): string {
 }
 
 export function statusPath(runDirPath: string): string {
-  return path.join(runDirPath, 'status.json');
+  return path.join(runDirPath, "status.json");
 }
 
 export function resultPath(runDirPath: string): string {
-  return path.join(runDirPath, 'result.md');
+  return path.join(runDirPath, "result.md");
 }
 
 export function resultJsonPath(runDirPath: string): string {
-  return path.join(runDirPath, 'result.json');
+  return path.join(runDirPath, "result.json");
 }
 
 export function logPath(runDirPath: string): string {
-  return path.join(runDirPath, 'run.log');
+  return path.join(runDirPath, "run.log");
 }
 
 export function runConfigPath(runDirPath: string): string {
-  return path.join(runDirPath, 'run.json');
+  return path.join(runDirPath, "run.json");
 }

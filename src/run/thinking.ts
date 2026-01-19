@@ -1,6 +1,6 @@
-import path from 'path';
-import { nowIso } from '../utils/time.js';
-import { pathExists, readJson, writeJsonAtomic } from '../utils/fs.js';
+import path from "path";
+import { nowIso } from "../utils/time.js";
+import { pathExists, readJson, writeJsonAtomic } from "../utils/fs.js";
 
 export type ThinkingState = {
   cursor: number;
@@ -9,16 +9,21 @@ export type ThinkingState = {
 };
 
 export function thinkingStatePath(runDirPath: string): string {
-  return path.join(runDirPath, 'thinking.json');
+  return path.join(runDirPath, "thinking.json");
 }
 
-export async function readThinkingState(runDirPath: string): Promise<ThinkingState | null> {
+export async function readThinkingState(
+  runDirPath: string,
+): Promise<ThinkingState | null> {
   const statePath = thinkingStatePath(runDirPath);
   if (!(await pathExists(statePath))) return null;
   return readJson<ThinkingState>(statePath);
 }
 
-export async function saveThinkingState(runDirPath: string, state: ThinkingState): Promise<void> {
+export async function saveThinkingState(
+  runDirPath: string,
+  state: ThinkingState,
+): Promise<void> {
   await writeJsonAtomic(thinkingStatePath(runDirPath), state);
 }
 
