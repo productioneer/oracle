@@ -9,7 +9,7 @@ npm install
 npm run build
 
 # run a prompt (background)
-node dist/cli.js run --prompt "Hello"
+node dist/cli.js run "Hello"
 
 # check status
 node dist/cli.js status <run_id>
@@ -19,6 +19,12 @@ node dist/cli.js watch <run_id>
 
 # get result
 node dist/cli.js result <run_id>
+
+# continue a conversation
+node dist/cli.js run <run_id> "Follow up"
+
+# stdin prompt
+echo "Hello" | node dist/cli.js run
 ```
 
 ## Core Commands
@@ -27,6 +33,7 @@ node dist/cli.js result <run_id>
 - `oracle status` — read `status.json`.
 - `oracle watch` — poll until completion.
 - `oracle result` — print result content/metadata.
+- `oracle thinking` — print thinking output (incremental by default, `--full` for complete).
 - `oracle resume` — restart a run using existing state.
 - `oracle cancel` — cancel a run.
 - `oracle open` — open visible browser window for login/recovery.
@@ -42,7 +49,7 @@ node scripts/mock-server.js --port 7777
 Use it as the base URL:
 
 ```bash
-node dist/cli.js run --prompt "Hello" --base-url http://127.0.0.1:7777/
+node dist/cli.js run "Hello" --base-url http://127.0.0.1:7777/
 ```
 
 Simulate long wait / stuck streaming:
@@ -51,11 +58,12 @@ Simulate long wait / stuck streaming:
 http://127.0.0.1:7777/?stall=1
 ```
 
-You can also set `--stall-ms` and `--timeout-ms` when running to test recovery vs. long waits.
+You can set `ORACLE_DEV=1` to expose `--timeout-ms` for long-run testing.
 
 ## Notes
 
 - Chrome focus-safe launch uses `open -n -g` and `--no-startup-window` with hidden CDP targets.
+- Default thinking effort is Extended; use `--thinking standard` to override.
 - Firefox support uses Puppeteer WebDriver BiDi (headful). Focus prevention is best-effort.
 - On macOS, Firefox automation requires Firefox Developer Edition or Nightly (distinct bundle ID) to avoid controlling your personal Firefox. Install one or pass `--firefox-app /Applications/Firefox\ Developer\ Edition.app` (or set `ORACLE_FIREFOX_APP`). Keep that app reserved for Oracle; if its window title doesn't match the Oracle automation homepage, focus suppression is skipped to avoid touching personal windows.
 - Firefox focus on macOS uses an AppleScript ladder (background launch → hide → minimize). If permissions are blocked, the window may stay visible and `status.json` will include a `focus` section with `state` and `needsUser` details.

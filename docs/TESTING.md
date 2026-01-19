@@ -5,7 +5,7 @@
 1. Run a prompt against the real interface:
 
 ```
-node dist/cli.js run --prompt "Hello"
+node dist/cli.js run "Hello"
 ```
 
 Note: Chrome always uses the dedicated Oracle profile at `~/.oracle/chrome`. If you're not logged in yet, use `oracle open`.
@@ -26,9 +26,11 @@ node dist/cli.js resume <run_id>
 
 The mock server (`scripts/mock-server.js`) mirrors core UI hooks used by automation:
 
-- Prompt input: `textarea#prompt-textarea`
+- Prompt input: `#prompt-textarea`
+- Send button: `button[data-testid="send-button"]`
 - Message wrappers: `[data-message-author-role="user|assistant"]`
-- Stop button: `button[aria-label="Stop generating"]`
+- Stop button: button text/aria containing "Stop"
+- Action buttons: `[data-testid="good-response-turn-action-button"]`, `[data-testid="bad-response-turn-action-button"]`
 
 When ChatGPT changes:
 
@@ -38,16 +40,16 @@ When ChatGPT changes:
 
 ## Long-Run Validation
 
-Use the mock `stall=1` query to simulate a streaming stall and confirm recovery:
+Use the mock `stall=1` query to simulate a streaming stall and confirm refresh behavior:
 
 ```
-node dist/cli.js run --prompt "stall" --base-url http://127.0.0.1:7777/?stall=1 --stall-ms 30000 --timeout-ms 120000
+ORACLE_DEV=1 node dist/cli.js run "stall" --base-url http://127.0.0.1:7777/?stall=1 --timeout-ms 120000
 ```
 
 For a 2h+ streaming run, use `durationMs` on the mock server and raise the timeout:
 
 ```
-node dist/cli.js run --prompt "long" --base-url http://127.0.0.1:7777/?durationMs=7200000 --timeout-ms 7800000
+ORACLE_DEV=1 node dist/cli.js run "long" --base-url http://127.0.0.1:7777/?durationMs=7200000 --timeout-ms 7800000
 ```
 
 ## Structured Output Extraction
@@ -87,5 +89,5 @@ Notes:
 Set `ORACLE_CAPTURE_HTML=1` to save `completion.html`/`completion.png` for real ChatGPT runs:
 
 ```
-ORACLE_CAPTURE_HTML=1 node dist/cli.js run --prompt "Hello"
+ORACLE_CAPTURE_HTML=1 node dist/cli.js run "Hello"
 ```
