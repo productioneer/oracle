@@ -63,6 +63,7 @@ import { isDetachedFrameError } from "./utils/errors.js";
 import { nowIso, sleep } from "./utils/time.js";
 
 const CANCEL_FILE = "cancel.json";
+const DEV_MODE = process.env.ORACLE_DEV === "1";
 class NeedsUserError extends Error {
   public readonly kind: string;
   constructor(kind: string, message: string) {
@@ -307,6 +308,7 @@ async function runAttempt(
       assertChatGptUrl(config.conversationUrl, "conversationUrl");
     }
     const targetUrl = config.conversationUrl ?? config.baseUrl;
+    const isLocalMock = DEV_MODE && isLocalUrl(targetUrl);
     await navigateToChat(page, targetUrl);
     await ensureWideViewport(page);
 
@@ -315,22 +317,30 @@ async function runAttempt(
     }
     for (let pageAttempt = 0; pageAttempt < 2; pageAttempt += 1) {
       try {
-        const ready = await ensureChatGptReady(page, logger);
-        if (!ready.ok && ready.reason === "cloudflare") {
-          await writeNeedsUser(
-            config,
-            "cloudflare",
-            ready.message ?? "Cloudflare challenge detected",
-          );
-          return "needs_user";
-        }
-        if (!ready.ok) {
-          await writeNeedsUser(config, "login", ready.message ?? "Login required");
-          return "needs_user";
-        }
+        if (!isLocalMock) {
+          const ready = await ensureChatGptReady(page, logger);
+          if (!ready.ok && ready.reason === "cloudflare") {
+            await writeNeedsUser(
+              config,
+              "cloudflare",
+              ready.message ?? "Cloudflare challenge detected",
+            );
+            return "needs_user";
+          }
+          if (!ready.ok) {
+            await writeNeedsUser(
+              config,
+              "login",
+              ready.message ?? "Login required",
+            );
+            return "needs_user";
+          }
 
-        await writeStatus(config, "running", "navigate", "checking model");
-        await ensureModelSelected(page, logger);
+          await writeStatus(config, "running", "navigate", "checking model");
+          await ensureModelSelected(page, logger);
+        } else {
+          logger("[dev] local mock detected; skipping session + model checks");
+        }
 
         try {
           await waitForPromptInput(page, 30_000, logger);
@@ -801,11 +811,33 @@ function assertChatGptUrl(url: string, label: string): void {
   } catch {
     throw new Error(`Invalid ${label} URL: ${url}`);
   }
+  if (DEV_MODE && isLocalHost(parsed.hostname)) {
+    return;
+  }
   if (parsed.origin !== "https://chatgpt.com") {
     throw new Error(
       `Unsupported ${label} URL (${url}). Only https://chatgpt.com/ is supported.`,
     );
   }
+}
+
+function isLocalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return isLocalHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isLocalHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "0.0.0.0" ||
+    normalized === "::1"
+  );
 }
 
 async function captureDebugArtifacts(

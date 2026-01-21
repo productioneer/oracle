@@ -12,6 +12,7 @@ import { sleep } from "../utils/time.js";
 
 export async function readThinkingContent(config: RunConfig): Promise<string> {
   let lastError: unknown;
+  const devMode = process.env.ORACLE_DEV === "1";
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let browser: import("playwright").Browser | null = null;
     let page: import("playwright").Page | null = null;
@@ -54,8 +55,10 @@ export async function readThinkingContent(config: RunConfig): Promise<string> {
         config.conversationUrl ?? config.baseUrl ?? DEFAULT_BASE_URL;
       await navigateToChat(page, targetUrl);
       await ensureWideViewport(page);
-      const ready = await ensureChatGptReady(page);
-      if (!ready.ok) throw new Error(ready.message ?? "ChatGPT not ready");
+      if (!(devMode && isLocalUrl(targetUrl))) {
+        const ready = await ensureChatGptReady(page);
+        if (!ready.ok) throw new Error(ready.message ?? "ChatGPT not ready");
+      }
       await waitForConversationContent(page, 15_000);
       return await getThinkingContent(page);
     } catch (error) {
@@ -141,6 +144,21 @@ async function isChromeDebugPortActive(port: number): Promise<boolean> {
 function isRetryableThinkingError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /detached frame|execution context was destroyed/i.test(message);
+}
+
+function isLocalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "0.0.0.0" ||
+      host === "::1"
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function disconnectBrowser(
