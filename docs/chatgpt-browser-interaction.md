@@ -12,6 +12,8 @@ Canonical reference for automating ChatGPT web UI. This is the up-to-date spec f
 
 **Selector change policy**: The selectors in this document are authoritative. Any changes, additions, or alternatives MUST be approved by the project owner before implementation. Do not add fallback selectors or alternative approaches without explicit approval. This policy exists because ad-hoc selector additions have historically caused unreliable, hard-to-debug code.
 
+**Logging requirement**: Implement **extensive debug logging** around all selectors and UI expectations. Every selector wait/resolve should log the primary/secondary selectors, resolved selector, counts, and mismatch status. Every expectation about UI state (preflight checks, model selection, prompt entry verification, send action, thinking panel open/close, completion state) must log success/failure and key state transitions. The goal is fast root-cause isolation when the UI changes.
+
 ---
 
 ## Phase 0: Pre-Flight Checks
@@ -21,8 +23,8 @@ Canonical reference for automating ChatGPT web UI. This is the up-to-date spec f
 Before any interaction, verify we have a valid logged-in session:
 
 1. **Check for model selector**: Look for `[data-testid='model-switcher-dropdown-button']`
-2. **Check for 5.2 Pro availability**: Model selector should show "5.2 Pro" option
-3. **Check for new chat button**: `[data-testid='create-new-chat-button']` should exist
+2. **Check for new chat button**: `[data-testid='create-new-chat-button']` should exist
+3. **Check for 5.2 Pro availability**: Confirm in **Phase 1.2** when opening the model dropdown
 
 **If any check fails**: Likely Cloudflare challenge or login required. Abort with clear error message prompting user to check their browser session. Do NOT attempt fallbacks or retries.
 

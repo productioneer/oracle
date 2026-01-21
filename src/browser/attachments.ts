@@ -21,6 +21,15 @@ type SelectorPair = {
   secondary?: string;
 };
 
+type SelectorMatch = {
+  selector: string | null;
+  mismatch: boolean;
+  primaryFound: boolean;
+  secondaryFound: boolean;
+  primaryCount: number;
+  secondaryCount: number;
+};
+
 const SELECTOR_PAIRS = {
   composerPlus: {
     name: "composerPlus",
@@ -62,6 +71,7 @@ async function uploadSingleAttachment(
   }
 
   const removeCount = await page.locator(SELECTORS.removeFileButton).count();
+  logDebug(logger, `starting upload for ${attachment.displayName}`);
 
   await openAttachmentMenu(page, logger);
   await page.getByText(SELECTORS.uploadMenuText).click();
@@ -76,15 +86,17 @@ async function uploadSingleAttachment(
     },
   );
   await page.locator(inputSelector).setInputFiles(attachment.path);
+  logDebug(logger, `setInputFiles for ${attachment.displayName}`);
 
-  await waitForRemoveButton(page, removeCount, attachment.displayName);
-  await waitForUploadComplete(page, attachment.displayName);
+  await waitForRemoveButton(page, removeCount, attachment.displayName, logger);
+  await waitForUploadComplete(page, attachment.displayName, logger);
 }
 
 async function openAttachmentMenu(
   page: Page,
   logger?: (message: string) => void,
 ): Promise<void> {
+  logDebug(logger, "opening attachment menu");
   const selector = await waitForSelectorPair(
     page,
     SELECTOR_PAIRS.composerPlus,
@@ -101,12 +113,16 @@ async function waitForRemoveButton(
   page: Page,
   previousCount: number,
   fileName: string,
+  logger?: (message: string) => void,
   timeoutMs = 10_000,
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const count = await page.locator(SELECTORS.removeFileButton).count();
-    if (count > previousCount) return;
+    if (count > previousCount) {
+      logDebug(logger, `remove button visible for ${fileName}`);
+      return;
+    }
     await sleep(300);
   }
   throw new Error(`Upload did not register for ${fileName}`);
@@ -115,6 +131,7 @@ async function waitForRemoveButton(
 async function waitForUploadComplete(
   page: Page,
   fileName: string,
+  logger?: (message: string) => void,
   timeoutMs = 30_000,
 ): Promise<void> {
   const start = Date.now();
@@ -157,7 +174,10 @@ async function waitForUploadComplete(
       },
     )) as { nameFound: boolean; uploading: boolean; complete: boolean };
 
-    if (state.nameFound && state.complete && !state.uploading) return;
+    if (state.nameFound && state.complete && !state.uploading) {
+      logDebug(logger, `upload complete for ${fileName}`);
+      return;
+    }
     await sleep(500);
   }
 
@@ -173,22 +193,30 @@ async function waitForSelectorPair(
   options: { timeoutMs?: number; state?: "attached" | "visible" } = {},
 ): Promise<string> {
   const combined = pair.secondary ? `${pair.primary}, ${pair.secondary}` : pair.primary;
+  logDebug(
+    logger,
+    `waitForSelectorPair ${pair.name} combined="${combined}" state=${options.state ?? "attached"}`,
+  );
   await page.waitForSelector(combined, {
     timeout: options.timeoutMs,
     state: options.state ?? "attached",
   });
   const resolved = await resolveSelectorPair(page, pair, logger);
-  if (!resolved) {
+  if (!resolved.selector) {
     throw new Error(`Selector not found for ${pair.name}`);
   }
-  return resolved;
+  logDebug(
+    logger,
+    `selector resolved ${pair.name} -> ${resolved.selector} (primaryCount=${resolved.primaryCount}, secondaryCount=${resolved.secondaryCount})`,
+  );
+  return resolved.selector;
 }
 
 async function resolveSelectorPair(
   page: Page,
   pair: SelectorPair,
   logger?: (message: string) => void,
-): Promise<string | null> {
+): Promise<SelectorMatch> {
   const resolved = (await page.evaluate(
     ({
       primary,
@@ -197,25 +225,33 @@ async function resolveSelectorPair(
       primary: string;
       secondary: string | null;
     }) => {
-      const primaryEl = document.querySelector(primary);
-      const secondaryEl = secondary ? document.querySelector(secondary) : null;
+      const primaryEls = Array.from(document.querySelectorAll(primary));
+      const secondaryEls = secondary
+        ? Array.from(document.querySelectorAll(secondary))
+        : [];
+      const primaryEl = primaryEls[0] ?? null;
+      const secondaryEl = secondaryEls[0] ?? null;
       const mismatch = primaryEl && secondaryEl && primaryEl !== secondaryEl;
       return {
         selector: primaryEl ? primary : secondaryEl ? secondary : null,
         mismatch,
+        primaryFound: Boolean(primaryEl),
+        secondaryFound: Boolean(secondaryEl),
+        primaryCount: primaryEls.length,
+        secondaryCount: secondaryEls.length,
       };
     },
     {
       primary: pair.primary,
       secondary: pair.secondary ?? null,
     },
-  )) as { selector: string | null; mismatch: boolean };
+  )) as SelectorMatch;
 
   if (resolved.mismatch) {
     logSelectorMismatch(pair.name, logger);
   }
 
-  return resolved.selector;
+  return resolved;
 }
 
 function logSelectorMismatch(
@@ -227,4 +263,11 @@ function logSelectorMismatch(
   logger?.(
     `[selectors] mismatch for ${key}; data-testid and aria selectors resolve to different elements. Please report this to the developer.`,
   );
+}
+
+function logDebug(
+  logger: ((message: string) => void) | undefined,
+  message: string,
+): void {
+  logger?.(`[attachments] ${message}`);
 }

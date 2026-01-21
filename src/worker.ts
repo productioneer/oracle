@@ -336,8 +336,14 @@ async function runAttempt(
             return "needs_user";
           }
 
-          await writeStatus(config, "running", "navigate", "checking model");
+        await writeStatus(config, "running", "navigate", "checking model");
+        try {
           await ensureModelSelected(page, logger);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          await writeNeedsUser(config, "unknown", message, "navigate");
+          return "needs_user";
+        }
         } else {
           logger("[dev] local mock detected; skipping session + model checks");
         }
@@ -407,6 +413,7 @@ async function runAttempt(
 
           await writeStatus(config, "running", "submit", "submitting prompt");
           const expectedTurn = await getNextUserTurnNumber(page);
+          logger(`[prompt] expecting user turn ${expectedTurn}`);
           const typedValue = await submitPrompt(page, config.prompt, logger);
           if (typedValue.trim() !== config.prompt.trim()) {
             logger(
@@ -426,7 +433,10 @@ async function runAttempt(
           await sleep(1000);
           await maybeCaptureConversationUrl(page, config);
           await saveRunConfig(config.runPath, config);
-          await waitForThinkingPanel(page, logger);
+          const thinkingReady = await waitForThinkingPanel(page, logger);
+          if (!thinkingReady) {
+            logger("[thinking] panel not confirmed after prompt");
+          }
         }
 
         await writeStatus(config, "running", "waiting", "awaiting response");
@@ -1180,6 +1190,7 @@ async function resubmitPrompt(
   await writeStatus(config, "running", "submit", "resubmitting prompt");
   await waitForPromptInput(page, 30_000, logger);
   const expectedTurn = await getNextUserTurnNumber(page);
+  logger(`[prompt] resubmit expecting user turn ${expectedTurn}`);
   const typedValue = await submitPrompt(page, config.prompt, logger);
   if (typedValue.trim() !== config.prompt.trim()) {
     // Best-effort; continue even if input doesn't echo exactly.

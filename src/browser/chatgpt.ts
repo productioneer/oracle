@@ -78,6 +78,15 @@ type SelectorPair = {
   secondary?: string;
 };
 
+type SelectorMatch = {
+  selector: string | null;
+  mismatch: boolean;
+  primaryFound: boolean;
+  secondaryFound: boolean;
+  primaryCount: number;
+  secondaryCount: number;
+};
+
 const SELECTOR_PAIRS = {
   promptInput: {
     name: "promptInput",
@@ -116,16 +125,12 @@ export async function ensureChatGptReady(
 ): Promise<ChatGptState> {
   const needsCloudflare = await detectCloudflare(page);
   const hasModelSwitcher = await selectorExists(page, SELECTOR_PAIRS.modelSwitcher, logger);
-  const hasModelOption = await page
-    .locator(SELECTORS.modelOptionPro)
-    .count()
-    .then((count) => count > 0)
-    .catch(() => false);
   const hasNewChat = await selectorExists(page, SELECTOR_PAIRS.newChat, logger, {
     requireText: "new chat",
   });
 
-  if (hasModelSwitcher && hasModelOption && hasNewChat) {
+  if (hasModelSwitcher && hasNewChat) {
+    logDebug(logger, "preflight ok (model switcher + new chat present)");
     return { ok: true };
   }
 
@@ -133,6 +138,10 @@ export async function ensureChatGptReady(
     ? "Cloudflare challenge detected. Complete the check in the browser and retry."
     : "Login required or session not ready. Ensure ChatGPT is logged in for the automation profile.";
 
+  logDebug(
+    logger,
+    `preflight failed (modelSwitcher=${hasModelSwitcher}, newChat=${hasNewChat}, cloudflare=${needsCloudflare})`,
+  );
   return {
     ok: false,
     reason: needsCloudflare ? "cloudflare" : "login",
@@ -154,6 +163,7 @@ export async function waitForPromptInput(
     timeoutMs,
     state: "attached",
   });
+  logDebug(logger, `prompt input selector resolved: ${selector}`);
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const canType = await page
@@ -199,14 +209,32 @@ export async function ensureModelSelected(
       return span?.innerText ?? "";
     })
     .catch(() => "");
-  if (/5\.2\s*pro/i.test(headerText)) return;
+  if (/5\.2\s*pro/i.test(headerText)) {
+    logDebug(logger, "model already 5.2 Pro");
+    return;
+  }
 
-  const selector = await waitForSelectorPair(page, SELECTOR_PAIRS.modelSwitcher, logger, {
-    timeoutMs: 15_000,
-    state: "visible",
-  });
+  const selector = await waitForSelectorPair(
+    page,
+    SELECTOR_PAIRS.modelSwitcher,
+    logger,
+    {
+      timeoutMs: 15_000,
+      state: "visible",
+    },
+  );
+  logDebug(logger, `opening model dropdown via ${selector}`);
   await page.locator(selector).click();
-  await page.locator(SELECTORS.modelOptionPro).waitFor({ state: "visible", timeout: 15_000 });
+  try {
+    await page
+      .locator(SELECTORS.modelOptionPro)
+      .waitFor({ state: "visible", timeout: 15_000 });
+  } catch (error) {
+    throw new Error(
+      "5.2 Pro model option not available. Verify account access and try again.",
+    );
+  }
+  logDebug(logger, "selecting model 5.2 Pro");
   await page.locator(SELECTORS.modelOptionPro).click();
   await page.waitForFunction(
     () => {
@@ -216,6 +244,7 @@ export async function ensureModelSelected(
     undefined,
     { timeout: 15_000 },
   );
+  logDebug(logger, "model verified as 5.2 Pro");
 }
 
 export async function setThinkingMode(
@@ -299,6 +328,7 @@ export async function submitPrompt(
 
   let typedValue = "";
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    logDebug(logger, `typing prompt attempt ${attempt + 1}`);
     await clearInput();
     await input.click();
     await page.keyboard.type(preparedPrompt, { delay: 30 });
@@ -310,9 +340,14 @@ export async function submitPrompt(
   }
 
   if (normalizeForCompare(typedValue) !== normalizeForCompare(preparedPrompt)) {
+    logDebug(
+      logger,
+      `prompt mismatch (expectedLen=${preparedPrompt.length}, typedLen=${typedValue.length})`,
+    );
     throw new Error("Prompt entry mismatch after typing");
   }
 
+  logDebug(logger, "prompt typed successfully; clicking send");
   await clickSendButton(page, logger);
   return typedValue;
 }
@@ -342,6 +377,7 @@ export async function waitForUserMessage(
   timeoutMs = 10_000,
 ): Promise<boolean> {
   const selector = `[data-testid="conversation-turn-${expectedTurn}"]`;
+  const expected = prompt.trim();
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const found = await page.evaluate(
@@ -363,7 +399,7 @@ export async function waitForUserMessage(
       },
       {
         selector,
-        text: prompt,
+        text: expected,
         userSelector: SELECTORS.userMessage,
       },
     );
@@ -387,19 +423,23 @@ export async function waitForThinkingPanel(
     }
 
     if (await hasProThinking(page)) {
+      logDebug(logger, "thinking panel visible (pro thinking found)");
       await ensureSidebarCloseButton(page);
       return true;
     }
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const clicked = await clickLatestThoughtHeader(page);
+      logDebug(logger, `thinking header click attempt ${attempt + 1}: ${clicked}`);
       if (!clicked) break;
       await sleep(THINKING_PANEL_RETRY_WAIT_MS);
       if (await hasProThinking(page)) {
+        logDebug(logger, "thinking panel visible after header click");
         await ensureSidebarCloseButton(page);
         return true;
       }
     }
+    logDebug(logger, "thinking panel not confirmed");
     return false;
   } catch (error) {
     logger?.(`[thinking] panel check failed: ${String(error)}`);
@@ -440,6 +480,7 @@ async function clickSendButton(page: Page, logger?: (message: string) => void): 
     timeoutMs: 15_000,
     state: "visible",
   });
+  logDebug(logger, `send button selector resolved: ${selector}`);
   const button = page.locator(selector);
   const disabled = await button.evaluate((el) =>
     el instanceof HTMLButtonElement ? el.disabled : false,
@@ -465,6 +506,8 @@ export async function waitForCompletion(
   let lastChangeAt = Date.now();
   let sawAssistant = false;
   let sawGenerating = false;
+  let lastCopyVisible = false;
+  let lastGenerating = false;
 
   const basePollMs = Number.isFinite(options.pollMs) ? options.pollMs : 1000;
   const pollMs = Math.max(500, Math.min(basePollMs, 1000));
@@ -484,11 +527,23 @@ export async function waitForCompletion(
         lastIndex = snapshot.lastAssistantIndex;
         lastChangeAt = Date.now();
         sawAssistant = true;
+        logDebug(
+          options.logger,
+          `response update (index=${lastIndex}, len=${lastText.length})`,
+        );
       }
     }
 
     if (snapshot.generating) {
       sawGenerating = true;
+    }
+    if (snapshot.copyVisible !== lastCopyVisible || snapshot.generating !== lastGenerating) {
+      logDebug(
+        options.logger,
+        `response state (copyVisible=${snapshot.copyVisible}, generating=${snapshot.generating})`,
+      );
+      lastCopyVisible = snapshot.copyVisible;
+      lastGenerating = snapshot.generating;
     }
 
     const stable = Date.now() - lastChangeAt >= RESPONSE_STABILITY_MS;
@@ -677,15 +732,23 @@ async function waitForSelectorPair(
   options: { timeoutMs?: number; state?: "attached" | "visible" } = {},
 ): Promise<string> {
   const combined = pair.secondary ? `${pair.primary}, ${pair.secondary}` : pair.primary;
+  logDebug(
+    logger,
+    `waitForSelectorPair ${pair.name} combined="${combined}" state=${options.state ?? "attached"}`,
+  );
   await page.waitForSelector(combined, {
     timeout: options.timeoutMs,
     state: options.state ?? "attached",
   });
   const resolved = await resolveSelectorPair(page, pair, logger);
-  if (!resolved) {
+  if (!resolved.selector) {
     throw new Error(`Selector not found for ${pair.name}`);
   }
-  return resolved;
+  logDebug(
+    logger,
+    `selector resolved ${pair.name} -> ${resolved.selector} (primaryCount=${resolved.primaryCount}, secondaryCount=${resolved.secondaryCount})`,
+  );
+  return resolved.selector;
 }
 
 async function selectorExists(
@@ -736,6 +799,10 @@ async function selectorExists(
     logSelectorMismatch(pair.name, logger);
   }
 
+  logDebug(
+    logger,
+    `selectorExists ${pair.name} found=${resolved.found} primaryCount=${resolved.primaryFound ? "1+" : "0"} secondaryCount=${resolved.secondaryFound ? "1+" : "0"}`,
+  );
   return resolved.found;
 }
 
@@ -743,7 +810,7 @@ async function resolveSelectorPair(
   page: Page,
   pair: SelectorPair,
   logger?: (message: string) => void,
-): Promise<string | null> {
+): Promise<SelectorMatch> {
   const resolved = (await page.evaluate(
     ({
       primary,
@@ -752,25 +819,33 @@ async function resolveSelectorPair(
       primary: string;
       secondary: string | null;
     }) => {
-      const primaryEl = document.querySelector(primary);
-      const secondaryEl = secondary ? document.querySelector(secondary) : null;
+      const primaryEls = Array.from(document.querySelectorAll(primary));
+      const secondaryEls = secondary
+        ? Array.from(document.querySelectorAll(secondary))
+        : [];
+      const primaryEl = primaryEls[0] ?? null;
+      const secondaryEl = secondaryEls[0] ?? null;
       const mismatch = primaryEl && secondaryEl && primaryEl !== secondaryEl;
       return {
         selector: primaryEl ? primary : secondaryEl ? secondary : null,
         mismatch,
+        primaryFound: Boolean(primaryEl),
+        secondaryFound: Boolean(secondaryEl),
+        primaryCount: primaryEls.length,
+        secondaryCount: secondaryEls.length,
       };
     },
     {
       primary: pair.primary,
       secondary: pair.secondary ?? null,
     },
-  )) as { selector: string | null; mismatch: boolean };
+  )) as SelectorMatch;
 
   if (resolved.mismatch) {
     logSelectorMismatch(pair.name, logger);
   }
 
-  return resolved.selector;
+  return resolved;
 }
 
 function maybeLogMismatch(
@@ -797,4 +872,11 @@ function logSelectorMismatch(
   logger?.(
     `[selectors] mismatch for ${key}; data-testid and aria selectors resolve to different elements. Please report this to the developer.`,
   );
+}
+
+function logDebug(
+  logger: ((message: string) => void) | undefined,
+  message: string,
+): void {
+  logger?.(`[chatgpt] ${message}`);
 }
