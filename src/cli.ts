@@ -42,6 +42,8 @@ const DEFAULT_MAX_ATTEMPTS = 1;
 const NEEDS_USER_WAIT_MS = 30_000;
 const NEEDS_USER_POLL_MS = 1000;
 const RUN_ESTABLISH_WAIT_MS = 30_000;
+const CONVERSATION_URL_WAIT_MS = 5_000;
+const CONVERSATION_URL_POLL_MS = 250;
 
 const argv = [...process.argv];
 const helpDevIndex = argv.indexOf("--help-dev");
@@ -521,25 +523,25 @@ program
         runId,
         options.runsRoot,
       );
+      const { status: initialStatus } = await loadStatusForRun(
+        runId,
+        options.runsRoot,
+      );
       if (config.browser === "chrome" && !config.debugPort) {
         config.debugPort = await getFreePort();
         await saveRunConfig(config.runPath, config);
       }
-      const initialStatus = await readStatusMaybe(runDirPath);
       const status = initialStatus
         ? await waitForNeedsUserResolution(runId, runDirPath, initialStatus)
         : null;
-      const conversationUrl = status?.conversationUrl ?? config.conversationUrl;
-      if (!conversationUrl) {
-        const state = status?.state ?? "unknown";
-        const stage = status?.stage ?? "unknown";
-        throw new Error(
-          `run ${runId} has no conversation URL (state=${state}, stage=${stage}). ` +
-            "Run did not complete or never created a conversation.",
-        );
-      }
-      assertValidUrl(conversationUrl, "conversation URL");
-      const targetUrl = conversationUrl;
+      const conversation = await waitForConversationUrl(
+        runId,
+        runDirPath,
+        config,
+        status,
+      );
+      assertValidUrl(conversation.url, "conversation URL");
+      const targetUrl = conversation.url;
       await openVisible(config, targetUrl);
       // eslint-disable-next-line no-console
       console.log(`Opened browser for ${runId}`);
@@ -817,6 +819,52 @@ async function waitForNeedsUserResolution(
   throw new Error(
     `run ${runId} requires user intervention (needs_user: ${type}${suffix}, stage=${stage}). ` +
       "Please escalate this issue to your user.",
+  );
+}
+
+async function waitForConversationUrl(
+  runId: string,
+  runDirPath: string,
+  config: RunConfig,
+  status: StatusPayload | null,
+): Promise<{ url: string; status: StatusPayload | null }> {
+  const start = Date.now();
+  let latestStatus = status;
+  let latestConfig = config;
+  while (Date.now() - start < CONVERSATION_URL_WAIT_MS) {
+    if (latestStatus?.state === "needs_user") {
+      latestStatus = await waitForNeedsUserResolution(
+        runId,
+        runDirPath,
+        latestStatus,
+      );
+    }
+    if (
+      latestStatus &&
+      ["completed", "failed", "canceled"].includes(latestStatus.state)
+    ) {
+      const state = latestStatus.state;
+      const stage = latestStatus.stage ?? "unknown";
+      throw new Error(
+        `run ${runId} has no conversation URL (state=${state}, stage=${stage}). ` +
+          "Run did not complete or never created a conversation.",
+      );
+    }
+    const url = latestStatus?.conversationUrl ?? latestConfig.conversationUrl;
+    if (url) return { url, status: latestStatus };
+    await sleep(CONVERSATION_URL_POLL_MS);
+    latestStatus = await readStatusMaybe(runDirPath);
+    try {
+      latestConfig = await readJson<RunConfig>(runConfigPath(runDirPath));
+    } catch {
+      // keep last config
+    }
+  }
+  const state = latestStatus?.state ?? "unknown";
+  const stage = latestStatus?.stage ?? "unknown";
+  throw new Error(
+    `run ${runId} has no conversation URL (state=${state}, stage=${stage}). ` +
+      "Run did not complete or never created a conversation.",
   );
 }
 

@@ -437,6 +437,12 @@ async function runAttempt(
           if (!thinkingReady) {
             logger("[thinking] panel not confirmed after prompt");
           }
+          await maybeCaptureConversationUrl(page, config);
+          if (!config.conversationUrl) {
+            logger("[prompt] conversation URL not detected after thinking");
+          } else {
+            await saveRunConfig(config.runPath, config);
+          }
         }
 
         await writeStatus(config, "running", "waiting", "awaiting response");

@@ -171,7 +171,14 @@ test('cancel errors when run completed', () => {
 
 test('open errors when conversation missing', () => {
   const root = makeRunRoot('oracle-open-noconvo-');
-  writeRunConfig(root, 'abc123-def456');
+  const { runDir } = writeRunConfig(root, 'abc123-def456');
+  writeStatus(runDir, {
+    runId: 'abc123-def456',
+    state: 'completed',
+    stage: 'cleanup',
+    updatedAt: new Date().toISOString(),
+    attempt: 1,
+  });
   const res = runCli(['open', 'abc123-def456', '--runs-root', root]);
   assert.equal(res.status, 1);
   assert.ok(res.stderr.includes('no conversation URL'));
