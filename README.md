@@ -63,7 +63,7 @@ You can set `ORACLE_DEV=1` to expose `--timeout-ms` for long-run testing.
 ## Notes
 
 - Chrome focus-safe launch uses `open -n -g` and `--no-startup-window` with hidden CDP targets.
-- Default thinking effort is Extended; use `--thinking standard` to override.
+- Default effort is Extended; use `--effort standard` to override.
 - Firefox support uses Puppeteer WebDriver BiDi (headful). Focus prevention is best-effort.
 - On macOS, Firefox automation requires Firefox Developer Edition or Nightly (distinct bundle ID) to avoid controlling your personal Firefox. Install one or pass `--firefox-app /Applications/Firefox\ Developer\ Edition.app` (or set `ORACLE_FIREFOX_APP`). Keep that app reserved for Oracle; if its window title doesn't match the Oracle automation homepage, focus suppression is skipped to avoid touching personal windows.
 - Firefox focus on macOS uses an AppleScript ladder (background launch → hide → minimize). If permissions are blocked, the window may stay visible and `status.json` will include a `focus` section with `state` and `needsUser` details.

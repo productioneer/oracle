@@ -13,10 +13,28 @@ const FILE_INPUT_SELECTORS = [
 ];
 
 const UPLOAD_INDICATORS = [
+  // chatgpt attachment indicators (various ui versions)
   '[data-testid*="attachment"]',
   '[data-testid*="file"]',
+  '[data-testid*="upload"]',
+  // remove/delete buttons near attachments
   '[aria-label*="Remove"]',
   '[aria-label*="remove"]',
+  '[aria-label*="Delete"]',
+  '[aria-label*="delete"]',
+  // attachment pill/chip containers
+  '[class*="attachment"]',
+  '[class*="Attachment"]',
+  '[class*="upload"]',
+  '[class*="Upload"]',
+  '[class*="file-"]',
+  '[class*="File"]',
+  // composer area file indicators
+  '#composer-background [class*="pill"]',
+  '#composer-background [class*="chip"]',
+  // generic close buttons that might indicate an attachment
+  'button[aria-label*="close"]',
+  'button[aria-label*="Close"]',
 ];
 
 /**
@@ -165,7 +183,7 @@ async function uploadSingleAttachment(
   }
 
   // Wait for upload indicator to appear
-  await waitForUploadConfirmation(page, attachment.displayName);
+  await waitForUploadConfirmation(page, attachment.displayName, fileInputSelector);
 }
 
 async function findFileInput(page: Page): Promise<string | null> {
@@ -179,38 +197,145 @@ async function findFileInput(page: Page): Promise<string | null> {
 async function waitForUploadConfirmation(
   page: Page,
   fileName: string,
+  fileInputSelector?: string | null,
   timeoutMs = 10_000,
 ): Promise<void> {
   const start = Date.now();
   const normalizedName = fileName.toLowerCase();
+  // also check without extension for partial matches
+  const baseName = normalizedName.replace(/\.[^.]+$/, "");
+  const allowBaseMatch =
+    baseName.length >= 3 && baseName !== normalizedName && !baseName.startsWith(".");
 
   while (Date.now() - start < timeoutMs) {
     const found = await page.evaluate(
-      (selectors, name) => {
-        for (const selector of selectors) {
-          const elements = Array.from(
-            document.querySelectorAll(selector),
-          ) as HTMLElement[];
-          for (const el of elements) {
-            const text = (el.textContent || "").toLowerCase();
-            const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-            const title = (el.getAttribute("title") || "").toLowerCase();
-            if (
-              text.includes(name) ||
-              aria.includes(name) ||
-              title.includes(name)
-            ) {
-              return true;
+      (
+        indicatorSelectors,
+        inputSelectors,
+        specificInputSelector,
+        name,
+        base,
+        allowBase,
+      ) => {
+        const matchesName = (value: string): boolean => {
+          if (!value) return false;
+          if (value.includes(name)) return true;
+          if (allowBase && base && value.includes(base)) return true;
+          return false;
+        };
+
+        const isVisible = (el: HTMLElement): boolean => {
+          const style = window.getComputedStyle(el);
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            style.opacity !== "0"
+          );
+        };
+
+        // Prefer composer area to avoid matching previous messages
+        const composerArea =
+          document.querySelector("#composer-background") ||
+          document.querySelector('[data-testid*="composer"]') ||
+          document.querySelector('form[class*="composer"]');
+        const searchRoots = composerArea ? [composerArea] : [document];
+
+        // strategy 0: check file inputs for matching files
+        const inputRoot = document;
+        const selectorList = [
+          ...(specificInputSelector ? [specificInputSelector] : []),
+          ...inputSelectors,
+        ];
+        const seenSelectors = new Set<string>();
+        for (const selector of selectorList) {
+          if (!selector || seenSelectors.has(selector)) continue;
+          seenSelectors.add(selector);
+          const inputs = Array.from(
+            inputRoot.querySelectorAll(selector),
+          ) as HTMLInputElement[];
+          for (const input of inputs) {
+            if (!(input instanceof HTMLInputElement)) continue;
+            const value = (input.value || "").toLowerCase();
+            if (matchesName(value)) {
+              return { found: true, strategy: "file-input" };
+            }
+            const fileNames = Array.from(input.files ?? []).map((file) =>
+              file.name.toLowerCase(),
+            );
+            if (fileNames.some((file) => matchesName(file))) {
+              return { found: true, strategy: "file-input" };
             }
           }
         }
-        return false;
+
+        // strategy 1: look for filename in indicator elements near composer
+        for (const root of searchRoots) {
+          for (const selector of indicatorSelectors) {
+            const elements = Array.from(
+              root.querySelectorAll(selector),
+            ) as HTMLElement[];
+            for (const el of elements) {
+              if (!isVisible(el)) continue;
+              const text = (el.textContent || "").toLowerCase();
+              const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+              const title = (el.getAttribute("title") || "").toLowerCase();
+              if (matchesName(text) || matchesName(aria) || matchesName(title)) {
+                return { found: true, strategy: "name-match" };
+              }
+            }
+          }
+        }
+
+        // strategy 2: look for remove/close buttons near the filename in composer
+        if (composerArea) {
+          const buttons = Array.from(
+            composerArea.querySelectorAll("button[aria-label], button[title]"),
+          ) as HTMLButtonElement[];
+          for (const button of buttons) {
+            const label = (
+              button.getAttribute("aria-label") ||
+              button.getAttribute("title") ||
+              ""
+            ).toLowerCase();
+            if (!/remove|delete|close/.test(label)) continue;
+            if (matchesName(label)) {
+              return { found: true, strategy: "close-button" };
+            }
+            const container =
+              button.closest(
+                '[class*="chip"], [class*="pill"], [class*="attachment"], [class*="file"]',
+              ) ?? button.parentElement;
+            if (container) {
+              const text = (container.textContent || "").toLowerCase();
+              if (matchesName(text)) {
+                return { found: true, strategy: "close-button" };
+              }
+            }
+          }
+        }
+
+        // strategy 3: check for loading indicator that might precede confirmation
+        const loadingIndicators = document.querySelectorAll(
+          '[class*="loading"], [class*="spinner"], [class*="progress"]',
+        );
+        const hasActiveLoading = Array.from(loadingIndicators).some(
+          (el) => (el as HTMLElement).offsetParent !== null,
+        );
+        if (hasActiveLoading) {
+          return { found: false, loading: true };
+        }
+
+        return { found: false };
       },
       UPLOAD_INDICATORS,
+      FILE_INPUT_SELECTORS,
+      fileInputSelector ?? null,
       normalizedName,
+      baseName,
+      allowBaseMatch,
     );
 
-    if (found) return;
+    if (found.found) return;
     await sleep(300);
   }
 

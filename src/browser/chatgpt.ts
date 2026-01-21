@@ -108,6 +108,23 @@ export async function waitForPromptInput(
   throw new Error("Prompt input not available");
 }
 
+export async function waitForIdle(
+  page: Page,
+  options: { timeoutMs?: number; pollMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 120_000;
+  const pollMs = options.pollMs ?? 500;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const generating = await isGenerating(page);
+    if (!generating) return;
+    await sleep(pollMs);
+  }
+  throw new ResponseStalledError(
+    "Timed out waiting for previous response to finish",
+  );
+}
+
 export async function setThinkingMode(
   page: Page,
   mode: ThinkingMode,
@@ -149,30 +166,349 @@ export async function submitPrompt(
   page: Page,
   prompt: string,
 ): Promise<string> {
-  const input = await page.$(SELECTORS.promptInput);
-  if (!input) throw new Error("Prompt input not found");
-  const tagName = await input.evaluate((el) => el.tagName.toLowerCase());
-  await input.evaluate((el) => (el as HTMLElement).focus());
-  if (tagName === "textarea") {
-    await input.evaluate((el) => {
-      (el as HTMLTextAreaElement).value = "";
-    });
-    await input.type(prompt, { delay: 5 });
-    await input.evaluate((el, value) => {
-      (el as HTMLTextAreaElement).value = value as string;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    }, prompt);
-  } else {
-    await input.evaluate((el) => {
-      (el as HTMLElement).textContent = "";
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await input.type(prompt, { delay: 5 });
+  await waitForPromptInput(page, 30_000);
+  const normalizedPrompt = prompt.replace(/\r\n/g, "\n");
+  // for multiline content, set innerHTML directly (faster), fallback to character-by-character
+  const isMultiline =
+    normalizedPrompt.includes("\n") || normalizedPrompt.includes("\t");
+  // set entire content at once for multiline prompts
+  const setFullContent = async (content: string) =>
+    page.evaluate(
+      (selectors, text) => {
+        const el = document.querySelector(selectors.promptInput);
+        if (!el) return false;
+        if (el instanceof HTMLTextAreaElement) {
+          const textarea = el;
+          const setter = Object.getOwnPropertyDescriptor(
+            HTMLTextAreaElement.prototype,
+            "value",
+          )?.set;
+          if (setter) {
+            setter.call(textarea, text);
+          } else {
+            textarea.value = text;
+          }
+          const inputEvent =
+            typeof InputEvent === "function"
+              ? new InputEvent("input", {
+                  bubbles: true,
+                  data: text,
+                  inputType: "insertText",
+                })
+              : new Event("input", { bubbles: true });
+          textarea.dispatchEvent(inputEvent);
+          textarea.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        }
+        // contenteditable: use <br> for newlines
+        const div = el as HTMLElement;
+        const lines = text.split("\n");
+        const html = lines
+          .map((line) => {
+            // escape HTML entities
+            return line
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
+          })
+          .join("<br>");
+        div.innerHTML = html;
+        const divInputEvent =
+          typeof InputEvent === "function"
+            ? new InputEvent("input", {
+                bubbles: true,
+                data: text,
+                inputType: "insertText",
+              })
+            : new Event("input", { bubbles: true });
+        div.dispatchEvent(divInputEvent);
+        div.dispatchEvent(new Event("change", { bubbles: true }));
+        // set cursor at end
+        const selection = window.getSelection();
+        if (selection) {
+          const range = document.createRange();
+          range.selectNodeContents(div);
+          range.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+        return true;
+      },
+      SELECTORS,
+      content,
+    );
+  const normalizeForCompare = (value: string) =>
+    value
+      .replace(/\r\n/g, "\n")
+      .replace(/\u00a0/g, " ")
+      .replace(/\t/g, "  ");
+  const readInputValue = async () =>
+    page.evaluate((selectors) => {
+      const el = document.querySelector(selectors.promptInput);
+      if (!el) return "";
+      if (el instanceof HTMLTextAreaElement) return el.value;
+      const text = (el as HTMLElement).innerText;
+      return text ?? (el as HTMLElement).textContent ?? "";
+    }, SELECTORS);
+  const clearInput = async () =>
+    page.evaluate((selectors) => {
+      const el = document.querySelector(selectors.promptInput);
+      if (!el) return false;
+      if (el instanceof HTMLTextAreaElement) {
+        const textarea = el as HTMLTextAreaElement;
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          "value",
+        )?.set;
+        if (setter) {
+          setter.call(textarea, "");
+        } else {
+          textarea.value = "";
+        }
+        const inputEvent =
+          typeof InputEvent === "function"
+            ? new InputEvent("input", {
+                bubbles: true,
+                data: "",
+                inputType: "deleteByCut",
+              })
+            : new Event("input", { bubbles: true });
+        textarea.dispatchEvent(inputEvent);
+        textarea.dispatchEvent(new Event("change", { bubbles: true }));
+        textarea.focus();
+        textarea.setSelectionRange(0, 0);
+        return true;
+      }
+      // contenteditable div - set text content and dispatch events
+      const div = el as HTMLElement;
+      div.textContent = "";
+      const inputEvent =
+        typeof InputEvent === "function"
+          ? new InputEvent("input", {
+              bubbles: true,
+              data: "",
+              inputType: "deleteByCut",
+            })
+          : new Event("input", { bubbles: true });
+      div.dispatchEvent(inputEvent);
+      div.dispatchEvent(new Event("change", { bubbles: true }));
+      if (typeof div.focus === "function") {
+        div.focus();
+      }
+      const selection = window.getSelection();
+      if (selection) {
+        const range = document.createRange();
+        range.selectNodeContents(div);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+      return true;
+    }, SELECTORS);
+  const ensureFocused = async () => {
+    await page.focus(SELECTORS.promptInput).catch(() => null);
+    const focused = await page
+      .evaluate((selectors) => {
+        const el = document.querySelector(selectors.promptInput);
+        return el ? document.activeElement === el : false;
+      }, SELECTORS)
+      .catch(() => false);
+    if (!focused) {
+      await page.click(SELECTORS.promptInput).catch(() => null);
+    }
+  };
+  const sendText = async (text: string, _delay = 0) => {
+    if (!text) return;
+    await ensureFocused();
+    // use DOM manipulation for reliable text insertion in contenteditable
+    await page.evaluate(
+      (selectors, textToInsert) => {
+        const el = document.querySelector(selectors.promptInput);
+        if (!el) return;
+        if (el instanceof HTMLTextAreaElement) {
+          const textarea = el;
+          const start = textarea.selectionStart ?? textarea.value.length;
+          const end = textarea.selectionEnd ?? textarea.value.length;
+          const next =
+            textarea.value.slice(0, start) +
+            textToInsert +
+            textarea.value.slice(end);
+          const setter = Object.getOwnPropertyDescriptor(
+            HTMLTextAreaElement.prototype,
+            "value",
+          )?.set;
+          if (setter) {
+            setter.call(textarea, next);
+          } else {
+            textarea.value = next;
+          }
+          const inputEvent =
+            typeof InputEvent === "function"
+              ? new InputEvent("input", {
+                  bubbles: true,
+                  data: textToInsert,
+                  inputType: "insertText",
+                })
+              : new Event("input", { bubbles: true });
+          textarea.dispatchEvent(inputEvent);
+          textarea.dispatchEvent(new Event("change", { bubbles: true }));
+          const pos = start + textToInsert.length;
+          textarea.setSelectionRange(pos, pos);
+          return;
+        }
+        // contenteditable div
+        const div = el as HTMLElement;
+        const selection = window.getSelection();
+        if (!selection) return;
+        let range: Range;
+        // ensure selection is inside the div, otherwise set cursor at end
+        if (
+          selection.rangeCount > 0 &&
+          div.contains(selection.anchorNode)
+        ) {
+          range = selection.getRangeAt(0);
+        } else {
+          range = document.createRange();
+          range.selectNodeContents(div);
+          range.collapse(false);
+        }
+        range.deleteContents();
+        const textNode = document.createTextNode(textToInsert);
+        range.insertNode(textNode);
+        range.setStartAfter(textNode);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        const divInputEvent =
+          typeof InputEvent === "function"
+            ? new InputEvent("input", {
+                bubbles: true,
+                data: textToInsert,
+                inputType: "insertText",
+              })
+            : new Event("input", { bubbles: true });
+        div.dispatchEvent(divInputEvent);
+        div.dispatchEvent(new Event("change", { bubbles: true }));
+      },
+      SELECTORS,
+      text,
+    );
+  };
+  const insertTab = async () => {
+    await ensureFocused();
+    try {
+      await page.keyboard.sendCharacter("\t");
+    } catch {
+      await page.type(SELECTORS.promptInput, "  ", { delay: 0 });
+    }
+    await ensureFocused();
+  };
+  const insertNewline = async () => {
+    await ensureFocused();
+    await page.evaluate((selectors) => {
+      const el = document.querySelector(selectors.promptInput);
+      if (!el) return false;
+      if (el instanceof HTMLTextAreaElement) {
+        const textarea = el as HTMLTextAreaElement;
+        const start = textarea.selectionStart ?? textarea.value.length;
+        const end = textarea.selectionEnd ?? textarea.value.length;
+        const next =
+          textarea.value.slice(0, start) + "\n" + textarea.value.slice(end);
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          "value",
+        )?.set;
+        if (setter) {
+          setter.call(textarea, next);
+        } else {
+          textarea.value = next;
+        }
+        const inputEvent =
+          typeof InputEvent === "function"
+            ? new InputEvent("input", {
+                bubbles: true,
+                data: "\n",
+                inputType: "insertLineBreak",
+              })
+            : new Event("input", { bubbles: true });
+        textarea.dispatchEvent(inputEvent);
+        textarea.dispatchEvent(new Event("change", { bubbles: true }));
+        const pos = start + 1;
+        textarea.setSelectionRange(pos, pos);
+        return true;
+      }
+      const div = el as HTMLElement;
+      const selection = window.getSelection();
+      if (!selection) return false;
+      const range =
+        selection.rangeCount > 0
+          ? selection.getRangeAt(0)
+          : document.createRange();
+      range.deleteContents();
+      const br = document.createElement("br");
+      range.insertNode(br);
+      range.setStartAfter(br);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const inputEvent =
+        typeof InputEvent === "function"
+          ? new InputEvent("input", {
+              bubbles: true,
+              data: "\n",
+              inputType: "insertLineBreak",
+            })
+          : new Event("input", { bubbles: true });
+      div.dispatchEvent(inputEvent);
+      div.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }, SELECTORS);
+    await ensureFocused();
+  };
+  const typeMultiline = async (value: string) => {
+    const lines = value.split("\n");
+    for (let i = 0; i < lines.length; i += 1) {
+      const segments = lines[i].split("\t");
+      for (let j = 0; j < segments.length; j += 1) {
+        await sendText(segments[j], 2);
+        if (j < segments.length - 1) {
+          await insertTab();
+        }
+      }
+      if (i < lines.length - 1) {
+        await insertNewline();
+      }
+    }
+  };
+
+  let typedValue = "";
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await waitForPromptInput(page, 10_000);
+    await ensureFocused();
+    const cleared = await clearInput();
+    if (!cleared) throw new Error("Prompt input not found");
+    await ensureFocused();
+
+    if (isMultiline) {
+      if (attempt === 0) {
+        // try direct content set first (faster)
+        await setFullContent(normalizedPrompt);
+      } else {
+        // fallback to character-by-character typing
+        await typeMultiline(normalizedPrompt);
+      }
+    } else {
+      await sendText(normalizedPrompt, 5);
+    }
+    await sleep(50);
+    typedValue = await readInputValue();
+    if (
+      !isMultiline ||
+      normalizeForCompare(typedValue) === normalizeForCompare(normalizedPrompt)
+    ) {
+      break;
+    }
   }
-  const typedValue = await input.evaluate((el) => {
-    if (el instanceof HTMLTextAreaElement) return el.value;
-    return (el as HTMLElement).innerText ?? "";
-  });
   const clicked = await clickSendIfPresent(page);
   if (!clicked) {
     await page.keyboard.press("Enter");

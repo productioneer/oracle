@@ -2,7 +2,7 @@ import fs from "fs";
 import { spawn } from "child_process";
 import http from "http";
 import path from "path";
-import type { Browser } from "puppeteer";
+import type { Browser, Page } from "puppeteer";
 import puppeteer from "puppeteer";
 import { sleep } from "../utils/time.js";
 import type { Logger } from "../utils/log.js";
@@ -21,6 +21,7 @@ export type ChromeConnection = {
   browser: Browser;
   debugPort: number;
   browserPid?: number;
+  reused: boolean;
 };
 
 export async function launchChrome(
@@ -40,7 +41,7 @@ export async function launchChrome(
         browserWSEndpoint: version.webSocketDebuggerUrl,
       });
       const browserPid = await findChromePid(existingPort, userDataDir);
-      return { browser, debugPort: existingPort, browserPid };
+      return { browser, debugPort: existingPort, browserPid, reused: true };
     }
   }
 
@@ -51,6 +52,7 @@ export async function launchChrome(
     "--no-first-run",
     "--no-default-browser-check",
     "--window-size=1440,900",
+    "--window-position=-32000,-32000",
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
@@ -59,8 +61,10 @@ export async function launchChrome(
   if (options.profileDir) {
     args.push(`--profile-directory=${options.profileDir}`);
   }
-  if (!options.allowVisible) {
-    args.push("--no-startup-window");
+  if (options.allowVisible) {
+    args.push("--window-position=0,0");
+  } else {
+    args.push("--no-startup-window", "--start-minimized");
   }
 
   const openArgs = ["-n", "-g", "-a", appName, "--args", ...args];
@@ -80,7 +84,7 @@ export async function launchChrome(
         browserWSEndpoint: version.webSocketDebuggerUrl,
       });
       const browserPid = await findChromePid(fallbackPort, userDataDir);
-      return { browser, debugPort: fallbackPort, browserPid };
+      return { browser, debugPort: fallbackPort, browserPid, reused: true };
     }
     throw error;
   }
@@ -93,12 +97,13 @@ export async function launchChrome(
     browserWSEndpoint: version.webSocketDebuggerUrl,
   });
   const browserPid = await findChromePid(debugPort, userDataDir);
-  return { browser, debugPort, browserPid };
+  return { browser, debugPort, browserPid, reused: false };
 }
 
 export async function createHiddenPage(
   browser: Browser,
   token: string,
+  options: { allowVisible?: boolean; logger?: Logger } = {},
 ): Promise<import("puppeteer").Page> {
   const browserTarget =
     browser.targets().find((t) => t.type() === "browser") ??
@@ -130,17 +135,63 @@ export async function createHiddenPage(
   const target =
     (await browser
       .waitForTarget((t) => (t as any)._targetId === targetId, {
-        timeout: 5_000,
+        timeout: 10_000,
       })
       .catch(() => null)) ??
     (await browser
-      .waitForTarget((t) => t.url() === url, { timeout: 5_000 })
+      .waitForTarget((t) => t.url() === url, { timeout: 10_000 })
       .catch(() => null));
   const page = await target?.page();
-  if (page) return page;
+  if (page) {
+    if (!options.allowVisible) {
+      await hideChromeWindowForPage(page, options.logger);
+    }
+    return page;
+  }
 
   // Fallback: create a normal page if hidden target cannot be attached.
-  return browser.newPage();
+  const fallback = await browser.newPage();
+  if (!options.allowVisible) {
+    await hideChromeWindowForPage(fallback, options.logger);
+  }
+  return fallback;
+}
+
+async function hideChromeWindowForPage(
+  page: Page,
+  logger?: Logger,
+): Promise<void> {
+  let lastError: unknown;
+  const start = Date.now();
+  const timeoutMs = 2_000;
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const client = await page.target().createCDPSession();
+      const { windowId } = await client.send("Browser.getWindowForTarget");
+      await client.send("Browser.setWindowBounds", {
+        windowId,
+        bounds: {
+          left: -32000,
+          top: -32000,
+          width: 800,
+          height: 600,
+          windowState: "normal",
+        },
+      });
+      await client.send("Browser.setWindowBounds", {
+        windowId,
+        bounds: { windowState: "minimized" },
+      });
+      await client.detach().catch(() => null);
+      return;
+    } catch (error) {
+      lastError = error;
+      await sleep(200);
+    }
+  }
+  if (lastError) {
+    logger?.(`[chrome] hide window failed: ${String(lastError)}`);
+  }
 }
 
 async function waitForDebugEndpoint(

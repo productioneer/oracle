@@ -59,17 +59,26 @@ program
 
 const runCommand = program
   .command("run")
+  .addHelpText(
+    "before",
+    "Prompt input: stdin (cat prompt.txt | oracle run) or -p/--prompt.\n",
+  )
   .description(
     "Start a new run or continue an existing conversation. " +
+      "Prompt can be provided via stdin (cat prompt.txt | oracle run). " +
       "Pass run_id as first argument to add a follow-up message to that conversation.",
   )
   .argument(
     "[args...]",
-    "prompt, or run_id followed by prompt to continue conversation",
+    "prompt (include @file refs inline), or run_id followed by prompt",
+  )
+  .addHelpText(
+    "before",
+    "Prompt can be provided via stdin (e.g. cat prompt.txt | oracle run).\n",
   )
   .option(
     "-p, --prompt <prompt>",
-    "prompt text (supports @file refs: @src/main.ts, @file.ts:23-90 for line ranges)",
+    "prompt text (supports inline @file refs: @src/main.ts, @file.ts:23-90)",
   )
   .option("--prompt-file <path>", "path to prompt file")
   .option(
@@ -80,11 +89,8 @@ const runCommand = program
   .option("--allow-visible", "Allow visible window for login", false)
   .option("--focus-only", "Run focus setup only (no navigation)", false)
   .option("--allow-kill", "Allow killing automation Chrome if stuck", false)
-  .option(
-    "--thinking <mode>",
-    "thinking effort (extended or standard)",
-    "extended",
-  )
+  .option("--effort <mode>", "effort level (extended or standard)")
+  .option("--thinking <mode>", "deprecated alias for --effort")
   .option("--json", "Output machine-readable JSON", false);
 
 if (DEV_MODE) {
@@ -143,7 +149,7 @@ runCommand.action(async (args, options) => {
     DEV_MODE && options.maxAttempts
       ? Number(options.maxAttempts)
       : DEFAULT_MAX_ATTEMPTS;
-  const thinking = resolveThinkingMode(options.thinking);
+  const thinking = resolveThinkingMode(options.effort ?? options.thinking);
 
   let config: RunConfig;
   if (existing) {
@@ -278,10 +284,21 @@ program
   .option("--json", "Output JSON metadata", false)
   .action(async (runId, options) => {
     const runDirPath = runDir(runId, options.runsRoot);
+    const jsonPath = resultJsonPath(runDirPath);
     if (options.json) {
-      const result = await readJson<ResultPayload>(resultJsonPath(runDirPath));
+      const result = await readJson<ResultPayload>(jsonPath);
       writeJson(result);
       return;
+    }
+    let resultPayload: ResultPayload | null = null;
+    if (await pathExists(jsonPath)) {
+      resultPayload = await readJson<ResultPayload>(jsonPath);
+      if (resultPayload.error) {
+        // eslint-disable-next-line no-console
+        console.error(resultPayload.error);
+        process.exitCode = 1;
+        return;
+      }
     }
     const mdPath = resultPath(runDirPath);
     if (await pathExists(mdPath)) {
@@ -291,7 +308,7 @@ program
       console.log(markdown);
       return;
     }
-    const content = await readJson<ResultPayload>(resultJsonPath(runDirPath));
+    const content = resultPayload ?? (await readJson<ResultPayload>(jsonPath));
     // eslint-disable-next-line no-console
     console.log(content.content ?? "");
   });
@@ -356,6 +373,9 @@ program
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .action(async (runId, options) => {
     const runDirPath = runDir(runId, options.runsRoot);
+    if (!(await pathExists(runConfigPath(runDirPath)))) {
+      throw new Error("run not found");
+    }
     await writeJsonAtomic(path.join(runDirPath, "cancel.json"), {
       canceledAt: nowIso(),
     });
@@ -431,8 +451,17 @@ async function resolveRunInvocation(
     options.prompt,
     options.promptFile,
   );
-  let prompt =
-    promptFromOptions ?? (promptParts.length ? promptParts.join(" ") : null);
+  let prompt: string | null = null;
+  if (promptFromOptions !== null) {
+    if (promptParts.length) {
+      throw new Error(
+        "Unexpected extra arguments when using --prompt/--prompt-file. Include any @file refs inside the prompt string.",
+      );
+    }
+    prompt = promptFromOptions;
+  } else {
+    prompt = promptParts.length ? promptParts.join(" ") : null;
+  }
   if (!prompt) {
     prompt = await readPromptFromStdin();
   }

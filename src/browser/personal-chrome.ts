@@ -46,6 +46,20 @@ export async function openPersonalChrome(
   spawn("open", args, { stdio: "ignore", detached: true }).unref();
 }
 
+export async function waitForPersonalChromeExit(
+  oracleUserDataDir: string,
+  timeoutMs = 8000,
+  pollMs = 250,
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const pids = await listPersonalChromePids(oracleUserDataDir);
+    if (pids.length === 0) return true;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  return false;
+}
+
 export function shouldRestartPersonalChrome(
   pidsBefore: number[],
   pidsAfter: number[],

@@ -24,6 +24,7 @@ import {
   listPersonalChromePids,
   openPersonalChrome,
   shouldRestartPersonalChrome,
+  waitForPersonalChromeExit,
 } from "./browser/personal-chrome.js";
 import {
   markChromeRestartDone,
@@ -40,6 +41,7 @@ import {
   ResponseTimeoutError,
   setThinkingMode,
   submitPrompt,
+  waitForIdle,
   waitForUserMessage,
   waitForCompletion,
   waitForPromptInput,
@@ -54,6 +56,7 @@ import {
 import type { RunConfig, StatusPayload } from "./run/types.js";
 import { readJson, pathExists } from "./utils/fs.js";
 import { createLogger } from "./utils/log.js";
+import { isDetachedFrameError } from "./utils/errors.js";
 import { nowIso, sleep } from "./utils/time.js";
 
 const CANCEL_FILE = "cancel.json";
@@ -142,6 +145,7 @@ async function runAttempt(
   let browser: import("puppeteer").Browser | null = null;
   let page: import("puppeteer").Page | null = null;
   let keepFirefoxAlive = false;
+  let chromeReused = false;
   let firefoxApp = config.firefoxApp;
   if (config.browser === "firefox" && process.platform === "darwin") {
     try {
@@ -171,10 +175,14 @@ async function runAttempt(
         logger,
       });
       browser = connection.browser;
+      chromeReused = connection.reused;
       config.debugPort = connection.debugPort;
       config.browserPid = connection.browserPid;
       await saveRunConfig(config.runPath, config);
-      page = await createHiddenPage(browser, config.runId);
+      page = await createHiddenPage(browser, config.runId, {
+        allowVisible: config.allowVisible,
+        logger,
+      });
     } else {
       let connection: Awaited<ReturnType<typeof launchFirefox>>;
       try {
@@ -291,109 +299,157 @@ async function runAttempt(
     await navigateWithFallback(page, config.baseUrl);
     await ensureWideViewport(page);
 
-    const ready = await ensureChatGptReady(page);
-    if (ready.needsCloudflare) {
-      await writeNeedsUser(
-        config,
-        "cloudflare",
-        "Cloudflare challenge detected",
-      );
-      return "needs_user";
+    if (!page) {
+      throw new Error("Browser page unavailable");
     }
-    if (!ready.loggedIn) {
-      await writeNeedsUser(config, "login", "Login required");
-      return "needs_user";
-    }
-
-    await writeStatus(config, "running", "navigate", "opening conversation");
-    if (config.conversationUrl) {
-      await navigateToChat(page, config.conversationUrl);
-    }
-
-    try {
-      await waitForPromptInput(page);
-    } catch (error) {
-      await captureDebugArtifacts(page, config, logger, "prompt-input");
-      throw error;
-    }
-    await ensureWideViewport(page);
-
-    if (config.thinking) {
+    for (let pageAttempt = 0; pageAttempt < 2; pageAttempt += 1) {
       try {
-        const updated = await setThinkingMode(page, config.thinking);
-        if (!updated) {
-          logger("[thinking] toggle not available");
+        const ready = await ensureChatGptReady(page);
+        if (ready.needsCloudflare) {
+          await writeNeedsUser(
+            config,
+            "cloudflare",
+            "Cloudflare challenge detected",
+          );
+          return "needs_user";
         }
-      } catch (error) {
-        logger(`[thinking] toggle failed: ${String(error)}`);
-      }
-    }
+        if (!ready.loggedIn) {
+          await writeNeedsUser(config, "login", "Login required");
+          return "needs_user";
+        }
 
-    if (!(await promptAlreadySubmitted(page, config.prompt))) {
-      // Upload attachments if any
-      if (config.attachments && config.attachments.length > 0) {
-        await writeStatus(
-          config,
-          "running",
-          "submit",
-          `uploading ${config.attachments.length} file(s)`,
-        );
+        await writeStatus(config, "running", "navigate", "opening conversation");
+        if (config.conversationUrl) {
+          await navigateToChat(page, config.conversationUrl);
+        }
+
         try {
-          await uploadAttachments(page, config.attachments);
-          logger(`[attachments] uploaded ${config.attachments.length} file(s)`);
+          await waitForPromptInput(page);
         } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          logger(`[attachments] upload failed: ${message}`);
+          await captureDebugArtifacts(page, config, logger, "prompt-input");
           throw error;
         }
-      }
+        await ensureWideViewport(page);
 
-      await writeStatus(config, "running", "submit", "submitting prompt");
-      const typedValue = await submitPrompt(page, config.prompt);
-      if (typedValue.trim() !== config.prompt.trim()) {
-        logger(
-          `[prompt] mismatch typed="${typedValue}" expected="${config.prompt}"`,
+        if (config.thinking) {
+          try {
+            const updated = await setThinkingMode(page, config.thinking);
+            if (!updated) {
+              logger("[thinking] toggle not available");
+            }
+          } catch (error) {
+            logger(`[thinking] toggle failed: ${String(error)}`);
+          }
+        }
+
+        const alreadySubmitted = await promptAlreadySubmitted(
+          page,
+          config.prompt,
         );
+        if (!alreadySubmitted) {
+          try {
+            await waitForIdle(page, {
+              timeoutMs: config.timeoutMs,
+              pollMs: Math.min(config.pollMs, 1000),
+            });
+          } catch (error) {
+            logger(`[prompt] idle wait failed: ${String(error)}`);
+            throw error;
+          }
+          // Upload attachments if any
+          if (config.attachments && config.attachments.length > 0) {
+            await writeStatus(
+              config,
+              "running",
+              "submit",
+              `uploading ${config.attachments.length} file(s)`,
+            );
+            try {
+              await uploadAttachments(page, config.attachments);
+              logger(
+                `[attachments] uploaded ${config.attachments.length} file(s)`,
+              );
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              logger(`[attachments] upload failed: ${message}`);
+              throw error;
+            }
+          }
+
+          await writeStatus(config, "running", "submit", "submitting prompt");
+          const typedValue = await submitPrompt(page, config.prompt);
+          if (typedValue.trim() !== config.prompt.trim()) {
+            logger(
+              `[prompt] mismatch typed="${typedValue}" expected="${config.prompt}"`,
+            );
+          }
+          const submitted = await waitForUserMessage(
+            page,
+            config.prompt,
+            8_000,
+          );
+          if (!submitted) {
+            logger("[prompt] user message not detected; retrying submit");
+            await submitPrompt(page, config.prompt);
+          }
+          await sleep(1000);
+          await maybeCaptureConversationUrl(page, config);
+          await saveRunConfig(config.runPath, config);
+        }
+
+        await writeStatus(config, "running", "waiting", "awaiting response");
+        const completion = await waitForCompletionWithCancel(page, config, runDir);
+
+        if (
+          config.baseUrl.includes("127.0.0.1") ||
+          config.baseUrl.includes("localhost") ||
+          process.env.ORACLE_CAPTURE_HTML === "1"
+        ) {
+          await captureDebugArtifacts(page, config, logger, "completion");
+        }
+
+        config.conversationUrl = completion.conversationUrl;
+        config.lastAssistantIndex = completion.assistantIndex;
+        await saveRunConfig(config.runPath, config);
+
+        await writeStatus(config, "running", "extract", "writing result");
+        await saveResultMarkdown(config.resultPath, completion.content);
+        await saveResultJson(config.resultJsonPath, {
+          runId: config.runId,
+          state: "completed",
+          completedAt: nowIso(),
+          conversationUrl: completion.conversationUrl,
+          content: completion.content,
+        });
+
+        await writeStatus(config, "completed", "cleanup", "completed");
+        logger(`[worker] completed run ${config.runId}`);
+        return "completed";
+      } catch (error) {
+        if (!isDetachedFrameError(error) || pageAttempt >= 1 || !browser) {
+          throw error;
+        }
+        logger(
+          `[worker] detached frame detected; recreating page (${pageAttempt + 1}/2)`,
+        );
+        if (page) {
+          try {
+            await page.close();
+          } catch (closeError) {
+            logger(`[worker] page close failed: ${String(closeError)}`);
+          }
+        }
+        page =
+          config.browser === "chrome"
+            ? await createHiddenPage(browser, config.runId, {
+                allowVisible: config.allowVisible,
+                logger,
+              })
+            : await browser.newPage();
       }
-      const submitted = await waitForUserMessage(page, config.prompt, 8_000);
-      if (!submitted) {
-        logger("[prompt] user message not detected; retrying submit");
-        await submitPrompt(page, config.prompt);
-      }
-      await sleep(1000);
-      await maybeCaptureConversationUrl(page, config);
-      await saveRunConfig(config.runPath, config);
     }
-
-    await writeStatus(config, "running", "waiting", "awaiting response");
-    const completion = await waitForCompletionWithCancel(page, config, runDir);
-
-    if (
-      config.baseUrl.includes("127.0.0.1") ||
-      config.baseUrl.includes("localhost") ||
-      process.env.ORACLE_CAPTURE_HTML === "1"
-    ) {
-      await captureDebugArtifacts(page, config, logger, "completion");
-    }
-
-    config.conversationUrl = completion.conversationUrl;
-    config.lastAssistantIndex = completion.assistantIndex;
-    await saveRunConfig(config.runPath, config);
-
-    await writeStatus(config, "running", "extract", "writing result");
-    await saveResultMarkdown(config.resultPath, completion.content);
-    await saveResultJson(config.resultJsonPath, {
-      runId: config.runId,
-      state: "completed",
-      completedAt: nowIso(),
-      conversationUrl: completion.conversationUrl,
-      content: completion.content,
-    });
-
-    await writeStatus(config, "completed", "cleanup", "completed");
-    logger(`[worker] completed run ${config.runId}`);
-    return "completed";
+    throw new Error("Detached frame retry limit exceeded");
   } catch (error) {
     if (error instanceof NeedsUserError) {
       return "needs_user";
@@ -437,6 +493,8 @@ async function runAttempt(
           if (!config.allowVisible) {
             await runFirefoxSetupPhase(appName, firefoxPid, logger);
           }
+          await browser.disconnect();
+        } else if (config.browser === "chrome" && chromeReused) {
           await browser.disconnect();
         } else {
           await browser.close();
@@ -598,6 +656,7 @@ async function attemptRecovery(
         }
       }
     }
+    await waitForPersonalChromeExit(oracleUserDataDir, 8_000);
     const personalPidsAfter = await listPersonalChromePids(oracleUserDataDir);
     if (shouldRestartPersonalChrome(personalPidsBefore, personalPidsAfter)) {
       try {

@@ -45,6 +45,18 @@ test('parsePromptAttachments inlines quoted ranges with line numbers', () => {
   });
 });
 
+test('parsePromptAttachments preserves blank lines in inline content', () => {
+  withTempDir((dir) => {
+    const filePath = path.join(dir, 'note.md');
+    fs.writeFileSync(filePath, 'alpha\n\nbeta\n');
+    const prompt = 'Include @note.md:1-3';
+    const parsed = parsePromptAttachments(prompt, dir);
+    assert.equal(parsed.attachments.length, 0);
+    const expected = 'Include ```md\n1\talpha\n2\t\n3\tbeta\n```';
+    assert.equal(parsed.prompt, expected);
+  });
+});
+
 test('parsePromptAttachments de-dupes inline ranges', () => {
   withTempDir((dir) => {
     const filePath = path.join(dir, 'sample.ts');

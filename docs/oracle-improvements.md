@@ -2,6 +2,34 @@
 
 Findings and decisions from testing session. For Codex implementation.
 
+> **Browser automation**: See [chatgpt-browser-interaction.md](./chatgpt-browser-interaction.md) for the canonical, up-to-date spec on ChatGPT browser interaction (selectors, phases, flows). That document supersedes the selector/navigation sections below for implementation purposes.
+>
+> **This document** contains additional context not in the browser spec: CLI design, recovery behavior, thinking output feature, conversation continuation, and the thinking monitoring pattern for subagents. All content remains valid.
+>
+> **Library-specific details**: See [puppeteer-notes.md](./puppeteer-notes.md) and [playwright-notes.md](./playwright-notes.md) for library-specific implementation details (file uploads, network idle detection, etc.).
+
+---
+
+## Hard Constraints
+
+### Domain Restriction
+
+**Only use `https://chatgpt.com/`**. No alternative domains, no fallbacks.
+
+- Do NOT use `chat.openai.com` (it just redirects anyway)
+- Do NOT add fallback URLs
+- If chatgpt.com doesn't work (Cloudflare, login required), fail with a clear error
+
+### Automation Library
+
+**Use Playwright, not Puppeteer.** Playwright is the more modern library with:
+- Built-in auto-waiting on all actions
+- Better file upload API (`setInputFiles`)
+- Native network idle detection (`waitForLoadState('networkidle')`)
+- Cross-browser support if ever needed
+
+Migration from Puppeteer to Playwright is required.
+
 ---
 
 ## ChatGPT UI Navigation
@@ -20,7 +48,7 @@ Findings and decisions from testing session. For Codex implementation.
 |---------|----------|
 | Send button | `button[data-testid="send-button"]` |
 | Stop button | Button with text "Stop" or `aria-label*="Stop"` |
-| Action buttons | `[data-testid="good-response-turn-action-button"]`, `[data-testid="bad-response-turn-action-button"]` |
+| Action buttons (completion) | `[data-testid="copy-turn-action-button"]` |
 | Assistant message | `[data-message-author-role="assistant"]` (use last one) |
 | Thinking effort dropdown | Button near textarea (contenteditable, #prompt-textarea) containing "Pro" or "Extended thinking", inside data-testid="composer-footer-actions" |
 | Thinking options | `[role="menuitemradio"]` with text "Standard" or "Extended" |
@@ -35,27 +63,27 @@ To set Extended:
 1. Check if button text already contains "Extended" → done
 2. Otherwise: click button → click `[role="menuitemradio"]` containing "Extended"
 
-Default: **Extended** (use `--thinking standard` to override)
+Default: **Extended** (use `--effort standard` to override)
 
 ---
 
 ## Completion Detection
 
-**Replace `stableMs` timer with deterministic check:**
+**Use copy button + stability check:**
 
 ```javascript
 function isResponseComplete(page) {
-  const actionBtn = document.querySelector(
-    '[data-testid="good-response-turn-action-button"], ' +
-    '[data-testid="bad-response-turn-action-button"]'
-  );
-  if (!actionBtn) return false;
-  const style = window.getComputedStyle(actionBtn);
+  // Primary indicator: copy button visible
+  const copyBtn = document.querySelector('[data-testid="copy-turn-action-button"]');
+  if (!copyBtn) return false;
+  const style = window.getComputedStyle(copyBtn);
   return style.display !== 'none' &&
          style.visibility !== 'hidden' &&
          style.opacity !== '0';
 }
 ```
+
+Additionally, poll every 500ms-1s and wait until response `innerText` is unchanged for 2 seconds.
 
 ---
 
@@ -67,10 +95,11 @@ function isResponseComplete(page) {
 function getLastAssistantResponse() {
   const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
   if (msgs.length === 0) return null;
-  return msgs[msgs.length - 1].innerText;
+  return msgs[msgs.length - 1].innerText; // innerText respects CSS visibility
 }
 ```
 
+- Use `innerText` (not `textContent`) to get only visible text
 - Remove `stripUiLabels` function
 - Remove fallback to body text parsing
 - If element not found, return null/fail clearly
@@ -84,6 +113,26 @@ function getLastAssistantResponse() {
 | Stop button visible but stuck | Refresh page only, do NOT resubmit |
 | Clearly failed/cancelled | Can resubmit once |
 | Max retries | 1 (not 3) |
+
+---
+
+## Follow-Up Message Handling
+
+When attempting to send a follow-up message to an existing conversation:
+
+1. **Check generation state first**: If model is still generating (Stop/Update visible), reject the request
+2. **Error message**: "Previous response still generating. Wait for completion or cancel before sending follow-up."
+3. **No implicit waiting**: The API should NOT silently wait for completion — caller must explicitly wait or cancel
+
+This prevents:
+- Accidentally interrupting an ongoing generation
+- Race conditions with concurrent requests
+- Ambiguous state where it's unclear if the previous message completed
+
+The caller (agent) is responsible for:
+- Using `oracle status` to check if previous run is complete
+- Using `oracle cancel` if they want to abort and send new message
+- Waiting appropriately before sending follow-ups
 
 ---
 
