@@ -421,11 +421,16 @@ program
         await saveRunConfig(config.runPath, config);
       }
       const status = await readStatusMaybe(runDirPath);
-      const targetUrl =
-        status?.conversationUrl ??
-        config.conversationUrl ??
-        config.baseUrl ??
-        DEFAULT_BASE_URL;
+      const conversationUrl = status?.conversationUrl ?? config.conversationUrl;
+      if (!conversationUrl) {
+        const state = status?.state ?? "unknown";
+        const stage = status?.stage ?? "unknown";
+        throw new Error(
+          `run ${runId} has no conversation URL (state=${state}, stage=${stage}). ` +
+            "Run did not complete or never created a conversation.",
+        );
+      }
+      const targetUrl = conversationUrl;
       await openVisible(config, targetUrl);
       // eslint-disable-next-line no-console
       console.log(`Opened browser for ${runId}`);
