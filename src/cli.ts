@@ -839,6 +839,8 @@ async function waitForConversationUrl(
         latestStatus,
       );
     }
+    const url = latestStatus?.conversationUrl ?? latestConfig.conversationUrl;
+    if (url) return { url, status: latestStatus };
     if (
       latestStatus &&
       ["completed", "failed", "canceled"].includes(latestStatus.state)
@@ -850,8 +852,6 @@ async function waitForConversationUrl(
           "Run did not complete or never created a conversation.",
       );
     }
-    const url = latestStatus?.conversationUrl ?? latestConfig.conversationUrl;
-    if (url) return { url, status: latestStatus };
     await sleep(CONVERSATION_URL_POLL_MS);
     latestStatus = await readStatusMaybe(runDirPath);
     try {
