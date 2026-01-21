@@ -579,6 +579,7 @@ function writeJson(payload: unknown): void {
 
 async function openVisible(config: RunConfig): Promise<void> {
   const { spawn } = await import("child_process");
+  const targetUrl = config.conversationUrl ?? config.baseUrl ?? DEFAULT_BASE_URL;
   if (config.browser === "chrome") {
     const args: string[] = [];
     args.push("--no-first-run", "--no-default-browser-check");
@@ -587,7 +588,7 @@ async function openVisible(config: RunConfig): Promise<void> {
       args.push(`--profile-directory=${config.profile.profileDir}`);
     if (config.debugPort)
       args.push(`--remote-debugging-port=${config.debugPort}`);
-    if (config.conversationUrl) args.push(config.conversationUrl);
+    if (targetUrl) args.push(targetUrl);
     spawn("open", ["-n", "-a", "Google Chrome", "--args", ...args], {
       stdio: "ignore",
       detached: true,
@@ -599,7 +600,7 @@ async function openVisible(config: RunConfig): Promise<void> {
     if (config.profile.profileDir) {
       args.push("-profile", config.profile.profileDir);
     }
-    if (config.conversationUrl) args.push(config.conversationUrl);
+    if (targetUrl) args.push(targetUrl);
     const appPath = config.firefoxApp?.appPath ?? "Firefox";
     spawn("open", ["-n", "-a", appPath, "--args", ...args], {
       stdio: "ignore",
