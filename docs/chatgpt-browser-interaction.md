@@ -131,7 +131,7 @@ This confirms the message was actually sent, not just that the button was clicke
 This step ensures we can monitor/extract thinking content.
 
 1. **Wait ~15-20 seconds** for "Pro thinking" text to appear
-2. **If it appears**: Thinking sidebar is open, proceed
+2. **If it appears**: also verify the sidebar close button (`[data-testid='close-button']`) is visible, then proceed
 3. **If it doesn't appear**:
    - Look for element matching `/Thought for \d+/` (e.g., "Thought for 1m 20s")
    - **Click** it to open the thinking sidebar

@@ -400,9 +400,7 @@ export async function waitForThinkingPanel(
         return true;
       }
     }
-
-    await ensureSidebarCloseButton(page);
-    return true;
+    return false;
   } catch (error) {
     logger?.(`[thinking] panel check failed: ${String(error)}`);
     return false;
