@@ -73,7 +73,7 @@ You can set `ORACLE_DEV=1` to expose `--timeout-ms` for long-run testing.
 - Runs persist state under `~/.oracle/runs/<run_id>` by default.
 - Chrome always uses the dedicated Oracle profile at `~/.oracle/chrome` (isolated from your main Chrome).
 - Firefox uses a dedicated Oracle profile at `~/.oracle/firefox` by default (override with `--firefox-profile`).
-- If login/Cloudflare is detected, `status.json` will be set to `needs_user` and you can run `oracle open <run_id>` to login, then `oracle resume <run_id>`.
+- If login/Cloudflare is detected, `status.json` will be set to `needs_user`. All commands wait up to 30s for it to clear, then error with “please escalate to your user.” Use `oracle open` (no run id) to login, then `oracle resume <run_id>`.
 - If `needs_user: kill_chrome` is set, resume with `oracle resume <run_id> --allow-kill` after reviewing the prompt.
 - Use `--focus-only` to test Firefox focus suppression without navigating to ChatGPT. Focus-only runs do not pool Firefox; the automation instance is closed after each run.
 - Debug artifacts (HTML/PNG) are written to `~/.oracle/runs/<run_id>/debug` when prompt input fails or when running against localhost.

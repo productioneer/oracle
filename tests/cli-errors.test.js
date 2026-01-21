@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { spawnSync } = require('node:child_process');
+const { spawnSync, spawn } = require('node:child_process');
 
 const cliPath = path.join(__dirname, '..', 'dist', 'cli.js');
 
@@ -69,6 +69,51 @@ test('status errors when status missing', () => {
   const res = runCli(['status', 'abc123-def456', '--runs-root', root]);
   assert.equal(res.status, 1);
   assert.ok(res.stderr.includes('status not available'));
+});
+
+test('status waits for needs_user to resolve', async () => {
+  const root = makeRunRoot('oracle-status-needs-user-');
+  const runId = 'abc123-def456';
+  const { runDir } = writeRunConfig(root, runId);
+  writeStatus(runDir, {
+    runId,
+    state: 'needs_user',
+    stage: 'login',
+    updatedAt: new Date().toISOString(),
+    attempt: 1,
+    needs: { type: 'login', details: 'login required' },
+  });
+
+  const child = spawn(process.execPath, [cliPath, 'status', runId, '--runs-root', root], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString();
+  });
+
+  setTimeout(() => {
+    writeStatus(runDir, {
+      runId,
+      state: 'running',
+      stage: 'waiting',
+      message: 'awaiting response',
+      updatedAt: new Date().toISOString(),
+      attempt: 1,
+    });
+  }, 50);
+
+  const exitCode = await new Promise((resolve) => {
+    child.on('close', resolve);
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(stderr.trim(), '');
+  assert.ok(stdout.includes('running (waiting)'));
 });
 
 test('result errors when missing', () => {

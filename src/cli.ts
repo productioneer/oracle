@@ -39,6 +39,9 @@ import { parsePromptAttachments } from "./run/attachments.js";
 const DEFAULT_POLL_MS = 15_000;
 const DEFAULT_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const DEFAULT_MAX_ATTEMPTS = 1;
+const NEEDS_USER_WAIT_MS = 30_000;
+const NEEDS_USER_POLL_MS = 1000;
+const RUN_ESTABLISH_WAIT_MS = 30_000;
 
 const argv = [...process.argv];
 const helpDevIndex = argv.indexOf("--help-dev");
@@ -127,6 +130,12 @@ runCommand.action(async (args, options) => {
     existing,
   } = await resolveRunInvocation(args, options);
   const runDirPath = runDir(runId, options.runsRoot);
+  if (existing) {
+    const status = await readStatusMaybe(runDirPath);
+    if (status) {
+      await waitForNeedsUserResolution(runId, runDirPath, status);
+    }
+  }
   await ensureDir(runDirPath);
 
   // Parse @file references and replace with [attached: filename]
@@ -240,8 +249,12 @@ runCommand.action(async (args, options) => {
     updatedAt: nowIso(),
     attempt: config.attempt,
   });
+  const initialStatusTimestamp = (await readJson<StatusPayload>(
+    config.statusPath,
+  )).updatedAt;
 
   await spawnWorker(runDirPath);
+  await waitForRunEstablished(runId, runDirPath, initialStatusTimestamp);
 
   if (options.json) {
     writeJson({
@@ -268,9 +281,14 @@ program
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .option("--json", "Output JSON", false)
   .action(async (runId, options) => {
-    const { runDirPath, status } = await loadStatusForRun(
+    const { runDirPath, status: initialStatus } = await loadStatusForRun(
       runId,
       options.runsRoot,
+    );
+    const status = await waitForNeedsUserResolution(
+      runId,
+      runDirPath,
+      initialStatus,
     );
     if (options.json) {
       writeJson(status);
@@ -295,15 +313,23 @@ program
     const hasJson = await pathExists(jsonPath);
     const hasMd = await pathExists(mdPath);
     if (!hasJson && !hasMd) {
-      const status = await readStatusMaybe(runDirPath);
-      const state = status?.state ?? "unknown";
-      const stage = status?.stage ?? "unknown";
-      throw new Error(
-        `result not available for run ${runId} (state=${state}, stage=${stage})`,
-      );
+      const initialStatus = await readStatusMaybe(runDirPath);
+      if (initialStatus) {
+        await waitForNeedsUserResolution(runId, runDirPath, initialStatus);
+      }
+      const hasJsonAfter = await pathExists(jsonPath);
+      const hasMdAfter = await pathExists(mdPath);
+      if (!hasJsonAfter && !hasMdAfter) {
+        const latestStatus = await readStatusMaybe(runDirPath);
+        const state = latestStatus?.state ?? "unknown";
+        const stage = latestStatus?.stage ?? "unknown";
+        throw new Error(
+          `result not available for run ${runId} (state=${state}, stage=${stage})`,
+        );
+      }
     }
     if (options.json) {
-      if (!hasJson) {
+      if (!(await pathExists(jsonPath))) {
         throw new Error(`result metadata not available for run ${runId}`);
       }
       const result = await readJson<ResultPayload>(jsonPath);
@@ -355,7 +381,10 @@ program
       runId,
       options.runsRoot,
     );
-    const status = await readStatusMaybe(runDirPath);
+    const initialStatus = await readStatusMaybe(runDirPath);
+    const status = initialStatus
+      ? await waitForNeedsUserResolution(runId, runDirPath, initialStatus)
+      : null;
     const conversationUrl = status?.conversationUrl ?? config.conversationUrl;
     if (!conversationUrl) {
       const state = status?.state ?? "unknown";
@@ -390,7 +419,10 @@ program
   .option("--allow-kill", "Allow killing automation Chrome if stuck", false)
   .action(async (runId, options) => {
     const runDirPath = await requireRunDir(runId, options.runsRoot);
-    const status = await readStatusMaybe(runDirPath);
+    const initialStatus = await readStatusMaybe(runDirPath);
+    const status = initialStatus
+      ? await waitForNeedsUserResolution(runId, runDirPath, initialStatus)
+      : null;
     if (status && ["completed", "failed", "canceled"].includes(status.state)) {
       throw new Error(`run ${runId} already ${status.state}`);
     }
@@ -414,7 +446,10 @@ program
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .action(async (runId, options) => {
     const runDirPath = await requireRunDir(runId, options.runsRoot);
-    const status = await readStatusMaybe(runDirPath);
+    const initialStatus = await readStatusMaybe(runDirPath);
+    const status = initialStatus
+      ? await waitForNeedsUserResolution(runId, runDirPath, initialStatus)
+      : null;
     if (status && ["completed", "failed", "canceled"].includes(status.state)) {
       throw new Error(`run ${runId} already ${status.state}`);
     }
@@ -443,6 +478,24 @@ program
     let lastState = "";
     while (true) {
       const status = await readJson<StatusPayload>(statusPath(runDirPath));
+      if (status.state === "needs_user") {
+        const resolved = await waitForNeedsUserResolution(
+          runId,
+          runDirPath,
+          status,
+        );
+        if (`${resolved.state}:${resolved.stage}` !== lastState) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `${resolved.state} (${resolved.stage}) ${resolved.message ?? ""}`.trim(),
+          );
+          lastState = `${resolved.state}:${resolved.stage}`;
+        }
+        if (["completed", "failed", "canceled"].includes(resolved.state)) {
+          break;
+        }
+        continue;
+      }
       if (`${status.state}:${status.stage}` !== lastState) {
         // eslint-disable-next-line no-console
         console.log(
@@ -472,7 +525,10 @@ program
         config.debugPort = await getFreePort();
         await saveRunConfig(config.runPath, config);
       }
-      const status = await readStatusMaybe(runDirPath);
+      const initialStatus = await readStatusMaybe(runDirPath);
+      const status = initialStatus
+        ? await waitForNeedsUserResolution(runId, runDirPath, initialStatus)
+        : null;
       const conversationUrl = status?.conversationUrl ?? config.conversationUrl;
       if (!conversationUrl) {
         const state = status?.state ?? "unknown";
@@ -714,6 +770,54 @@ async function readStatusMaybe(
   const statusFile = statusPath(runDirPath);
   if (!(await pathExists(statusFile))) return null;
   return readJson<StatusPayload>(statusFile);
+}
+
+async function waitForRunEstablished(
+  runId: string,
+  runDirPath: string,
+  initialUpdatedAt: string,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < RUN_ESTABLISH_WAIT_MS) {
+    await sleep(NEEDS_USER_POLL_MS);
+    const status = await readStatusMaybe(runDirPath);
+    if (!status) continue;
+    const established =
+      status.updatedAt !== initialUpdatedAt || status.state !== "starting";
+    if (established) {
+      await waitForNeedsUserResolution(runId, runDirPath, status);
+      return;
+    }
+  }
+  throw new Error(
+    `run ${runId} did not establish within ${Math.round(RUN_ESTABLISH_WAIT_MS / 1000)}s`,
+  );
+}
+
+async function waitForNeedsUserResolution(
+  runId: string,
+  runDirPath: string,
+  status: StatusPayload,
+): Promise<StatusPayload> {
+  if (status.state !== "needs_user") return status;
+  const start = Date.now();
+  let latest = status;
+  while (Date.now() - start < NEEDS_USER_WAIT_MS) {
+    await sleep(NEEDS_USER_POLL_MS);
+    const next = await readStatusMaybe(runDirPath);
+    if (next) {
+      latest = next;
+      if (next.state !== "needs_user") return next;
+    }
+  }
+  const type = latest.needs?.type ?? "unknown";
+  const details = latest.needs?.details ?? latest.message ?? "";
+  const stage = latest.stage ?? "unknown";
+  const suffix = details ? ` - ${details}` : "";
+  throw new Error(
+    `run ${runId} requires user intervention (needs_user: ${type}${suffix}, stage=${stage}). ` +
+      "Please escalate this issue to your user.",
+  );
 }
 
 async function requireRunDir(
