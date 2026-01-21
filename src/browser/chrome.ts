@@ -104,14 +104,51 @@ export async function createHiddenPage(
   options: { allowVisible?: boolean; logger?: Logger } = {},
 ): Promise<Page> {
   const context = browser.contexts()[0] ?? (await browser.newContext());
-  const page = await context.newPage();
+  const url = `data:text/html,oracle-${token}`;
+  let page: Page | null = null;
+  let cdp: import("playwright").CDPSession | null = null;
+
   try {
-    await page.goto(`data:text/html,oracle-${token}`, {
-      waitUntil: "domcontentloaded",
-    });
-  } catch {
-    // ignore data url failures
+    cdp = await browser.newBrowserCDPSession();
+    const waitForPage = context
+      .waitForEvent("page", { timeout: 10_000 })
+      .catch(() => null);
+    try {
+      await cdp.send("Target.createTarget", {
+        url,
+        background: true,
+        hidden: true,
+      } as any);
+    } catch (error) {
+      options.logger?.(
+        `[chrome] hidden target unsupported: ${String(error)}; retrying without hidden flag`,
+      );
+      await cdp.send("Target.createTarget", {
+        url,
+        background: true,
+      } as any);
+    }
+    page = await waitForPage;
+    if (!page) {
+      page = context.pages().find((candidate) => candidate.url() === url) ?? null;
+    }
+  } catch (error) {
+    options.logger?.(`[chrome] hidden target create failed: ${String(error)}`);
+  } finally {
+    if (cdp) {
+      await cdp.detach().catch(() => null);
+    }
   }
+
+  if (!page) {
+    page = await context.newPage();
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+    } catch {
+      // ignore data url failures
+    }
+  }
+
   if (!options.allowVisible) {
     await hideChromeWindowForPage(page, options.logger);
   }
