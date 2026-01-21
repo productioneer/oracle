@@ -166,20 +166,39 @@ async function hideChromeWindowForPage(
     try {
       const client = await page.context().newCDPSession(page);
       const { windowId } = await client.send("Browser.getWindowForTarget");
-      await client.send("Browser.setWindowBounds", {
-        windowId,
-        bounds: {
-          left: -32000,
-          top: -32000,
-          width: 800,
-          height: 600,
-          windowState: "normal",
-        },
-      });
-      await client.send("Browser.setWindowBounds", {
-        windowId,
-        bounds: { windowState: "minimized" },
-      });
+      const current = await client
+        .send("Browser.getWindowBounds", { windowId })
+        .catch(() => null);
+      if (current?.bounds?.windowState === "minimized") {
+        await client.detach().catch(() => null);
+        return;
+      }
+      try {
+        await client.send("Browser.setWindowBounds", {
+          windowId,
+          bounds: { windowState: "minimized" },
+        });
+      } catch (error) {
+        logger?.(`[chrome] minimize failed: ${String(error)}`);
+      }
+      const after = await client
+        .send("Browser.getWindowBounds", { windowId })
+        .catch(() => null);
+      if (after?.bounds?.windowState !== "minimized") {
+        await client.send("Browser.setWindowBounds", {
+          windowId,
+          bounds: {
+            left: -32000,
+            top: -32000,
+            width: 800,
+            height: 600,
+          },
+        });
+        await client.send("Browser.setWindowBounds", {
+          windowId,
+          bounds: { windowState: "minimized" },
+        });
+      }
       await client.detach().catch(() => null);
       return;
     } catch (error) {

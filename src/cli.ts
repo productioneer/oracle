@@ -44,6 +44,8 @@ const NEEDS_USER_POLL_MS = 1000;
 const RUN_ESTABLISH_WAIT_MS = 30_000;
 const CONVERSATION_URL_WAIT_MS = 5_000;
 const CONVERSATION_URL_POLL_MS = 250;
+const PROMPT_SUBMIT_WAIT_MS = 60_000;
+const PROMPT_SUBMIT_POLL_MS = 500;
 
 const argv = [...process.argv];
 const helpDevIndex = argv.indexOf("--help-dev");
@@ -257,6 +259,7 @@ runCommand.action(async (args, options) => {
 
   await spawnWorker(runDirPath);
   await waitForRunEstablished(runId, runDirPath, initialStatusTimestamp);
+  await waitForPromptSubmitted(runId, runDirPath);
 
   if (options.json) {
     writeJson({
@@ -793,6 +796,41 @@ async function waitForRunEstablished(
   }
   throw new Error(
     `run ${runId} did not establish within ${Math.round(RUN_ESTABLISH_WAIT_MS / 1000)}s`,
+  );
+}
+
+async function waitForPromptSubmitted(
+  runId: string,
+  runDirPath: string,
+): Promise<void> {
+  const start = Date.now();
+  let status = await readStatusMaybe(runDirPath);
+  while (Date.now() - start < PROMPT_SUBMIT_WAIT_MS) {
+    if (status?.state === "needs_user") {
+      status = await waitForNeedsUserResolution(runId, runDirPath, status);
+    }
+    if (status) {
+      if (["completed", "failed", "canceled"].includes(status.state)) {
+        await waitForConversationUrl(runId, runDirPath, await readJson<RunConfig>(runConfigPath(runDirPath)), status);
+        return;
+      }
+      const stageReady =
+        status.stage === "waiting" ||
+        status.stage === "extract" ||
+        status.stage === "cleanup";
+      if (stageReady) {
+        const config = await readJson<RunConfig>(runConfigPath(runDirPath));
+        await waitForConversationUrl(runId, runDirPath, config, status);
+        return;
+      }
+    }
+    await sleep(PROMPT_SUBMIT_POLL_MS);
+    status = await readStatusMaybe(runDirPath);
+  }
+  const state = status?.state ?? "unknown";
+  const stage = status?.stage ?? "unknown";
+  throw new Error(
+    `run ${runId} did not submit prompt within ${Math.round(PROMPT_SUBMIT_WAIT_MS / 1000)}s (state=${state}, stage=${stage})`,
   );
 }
 

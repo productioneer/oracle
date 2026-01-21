@@ -29,7 +29,7 @@ echo "Hello" | node dist/cli.js run
 
 ## Core Commands
 
-- `oracle run` — start a run (background worker).
+- `oracle run` — start a run (blocks until prompt is submitted).
 - `oracle status` — read `status.json`.
 - `oracle watch` — poll until completion.
 - `oracle result` — print result content/metadata.

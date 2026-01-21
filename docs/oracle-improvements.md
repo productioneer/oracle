@@ -157,6 +157,11 @@ oracle thinking <run_id> --full        # complete thinking
 oracle cancel <run_id>
 ```
 
+### Run Command Behavior
+
+- `oracle run` blocks until the prompt is actually submitted (the run reaches waiting and the conversation URL is available), so `oracle open <run_id>` works immediately.
+- If a run enters `needs_user`, the command waits up to 30 seconds for it to clear, then errors with a message instructing escalation to the user.
+
 ### Smart Positional Arg Detection
 
 First positional arg to `oracle run` needs disambiguation:
