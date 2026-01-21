@@ -1,7 +1,6 @@
 import { launchChrome, createHiddenPage } from "../browser/chrome.js";
 import { launchFirefox } from "../browser/firefox.js";
 import {
-  DEFAULT_BASE_URL,
   ensureChatGptReady,
   ensureWideViewport,
   getThinkingContent,
@@ -51,8 +50,12 @@ export async function readThinkingContent(config: RunConfig): Promise<string> {
 
       if (!page) throw new Error("Failed to open browser page");
       await ensureWideViewport(page);
-      const targetUrl =
-        config.conversationUrl ?? config.baseUrl ?? DEFAULT_BASE_URL;
+      if (!config.conversationUrl) {
+        throw new Error(
+          `Thinking requires a conversation URL for run ${config.runId}`,
+        );
+      }
+      const targetUrl = config.conversationUrl;
       await navigateToChat(page, targetUrl);
       await ensureWideViewport(page);
       if (!(devMode && isLocalUrl(targetUrl))) {

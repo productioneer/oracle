@@ -11,6 +11,37 @@ test('oracle result prints error immediately', () => {
   const runDir = path.join(root, runId);
   fs.mkdirSync(runDir, { recursive: true });
 
+  fs.writeFileSync(
+    path.join(runDir, 'run.json'),
+    JSON.stringify(
+      {
+        runId,
+        createdAt: new Date().toISOString(),
+        prompt: 'hi',
+        promptHash: 'hash',
+        browser: 'chrome',
+        profile: { kind: 'chrome', userDataDir: path.join(root, 'profile') },
+        headless: false,
+        baseUrl: 'https://chatgpt.com/',
+        allowVisible: false,
+        allowKill: false,
+        pollMs: 15000,
+        timeoutMs: 60000,
+        thinking: 'extended',
+        attempt: 1,
+        maxAttempts: 1,
+        outDir: runDir,
+        statusPath: path.join(runDir, 'status.json'),
+        resultPath: path.join(runDir, 'result.md'),
+        resultJsonPath: path.join(runDir, 'result.json'),
+        logPath: path.join(runDir, 'run.log'),
+        runPath: path.join(runDir, 'run.json'),
+      },
+      null,
+      2,
+    ),
+  );
+
   const resultPath = path.join(runDir, 'result.json');
   fs.writeFileSync(
     resultPath,

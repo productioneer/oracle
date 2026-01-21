@@ -139,15 +139,18 @@ runCommand.action(async (args, options) => {
 
   const promptHash = crypto.createHash("sha256").update(prompt).digest("hex");
   const baseUrl = resolveBaseUrl(options.baseUrl);
+  assertValidUrl(baseUrl, "base URL");
   const pollMs =
-    DEV_MODE && options.pollMs ? Number(options.pollMs) : DEFAULT_POLL_MS;
+    DEV_MODE && options.pollMs
+      ? parsePositiveInt(options.pollMs, "poll-ms")
+      : DEFAULT_POLL_MS;
   const timeoutMs =
     DEV_MODE && options.timeoutMs
-      ? Number(options.timeoutMs)
+      ? parsePositiveInt(options.timeoutMs, "timeout-ms")
       : DEFAULT_TIMEOUT_MS;
   const maxAttempts =
     DEV_MODE && options.maxAttempts
-      ? Number(options.maxAttempts)
+      ? parsePositiveInt(options.maxAttempts, "max-attempts")
       : DEFAULT_MAX_ATTEMPTS;
   const thinking = resolveThinkingMode(options.effort ?? options.thinking);
 
@@ -155,7 +158,7 @@ runCommand.action(async (args, options) => {
   if (existing) {
     config = await readJson<RunConfig>(runConfigPath(runDirPath));
     if (DEV_MODE && options.browser) {
-      const browser = options.browser === "firefox" ? "firefox" : "chrome";
+      const browser = resolveBrowserOption(options.browser);
       config.browser = browser;
       config.profile = resolveProfile({
         browser,
@@ -190,8 +193,9 @@ runCommand.action(async (args, options) => {
     config.startedAt = undefined;
     config.completedAt = undefined;
   } else {
-    const browser =
-      DEV_MODE && options.browser === "firefox" ? "firefox" : "chrome";
+    const browser = DEV_MODE
+      ? resolveBrowserOption(options.browser)
+      : "chrome";
     const profile = resolveProfile({
       browser,
       firefoxProfile: options.firefoxProfile,
@@ -264,8 +268,10 @@ program
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .option("--json", "Output JSON", false)
   .action(async (runId, options) => {
-    const runDirPath = runDir(runId, options.runsRoot);
-    const status = await readJson<StatusPayload>(statusPath(runDirPath));
+    const { runDirPath, status } = await loadStatusForRun(
+      runId,
+      options.runsRoot,
+    );
     if (options.json) {
       writeJson(status);
       return;
@@ -283,15 +289,32 @@ program
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .option("--json", "Output JSON metadata", false)
   .action(async (runId, options) => {
-    const runDirPath = runDir(runId, options.runsRoot);
+    const runDirPath = await requireRunDir(runId, options.runsRoot);
     const jsonPath = resultJsonPath(runDirPath);
+    const mdPath = resultPath(runDirPath);
+    const hasJson = await pathExists(jsonPath);
+    const hasMd = await pathExists(mdPath);
+    if (!hasJson && !hasMd) {
+      const status = await readStatusMaybe(runDirPath);
+      const state = status?.state ?? "unknown";
+      const stage = status?.stage ?? "unknown";
+      throw new Error(
+        `result not available for run ${runId} (state=${state}, stage=${stage})`,
+      );
+    }
     if (options.json) {
+      if (!hasJson) {
+        throw new Error(`result metadata not available for run ${runId}`);
+      }
       const result = await readJson<ResultPayload>(jsonPath);
       writeJson(result);
+      if (result.state !== "completed" || result.error) {
+        process.exitCode = 1;
+      }
       return;
     }
     let resultPayload: ResultPayload | null = null;
-    if (await pathExists(jsonPath)) {
+    if (hasJson) {
       resultPayload = await readJson<ResultPayload>(jsonPath);
       if (resultPayload.error) {
         // eslint-disable-next-line no-console
@@ -300,17 +323,19 @@ program
         return;
       }
     }
-    const mdPath = resultPath(runDirPath);
-    if (await pathExists(mdPath)) {
+    if (hasMd) {
       const { promises: fs } = await import("fs");
       const markdown = await fs.readFile(mdPath, "utf8");
       // eslint-disable-next-line no-console
       console.log(markdown);
       return;
     }
-    const content = resultPayload ?? (await readJson<ResultPayload>(jsonPath));
-    // eslint-disable-next-line no-console
-    console.log(content.content ?? "");
+    if (resultPayload?.content) {
+      // eslint-disable-next-line no-console
+      console.log(resultPayload.content);
+      return;
+    }
+    throw new Error(`result content missing for run ${runId}`);
   });
 
 program
@@ -326,8 +351,20 @@ program
     false,
   )
   .action(async (runId, options) => {
-    const runDirPath = runDir(runId, options.runsRoot);
-    const config = await readJson<RunConfig>(runConfigPath(runDirPath));
+    const { runDirPath, config } = await loadRunConfigForRun(
+      runId,
+      options.runsRoot,
+    );
+    const status = await readStatusMaybe(runDirPath);
+    const conversationUrl = status?.conversationUrl ?? config.conversationUrl;
+    if (!conversationUrl) {
+      const state = status?.state ?? "unknown";
+      const stage = status?.stage ?? "unknown";
+      throw new Error(
+        `thinking not available for run ${runId} (state=${state}, stage=${stage})`,
+      );
+    }
+    config.conversationUrl = conversationUrl;
     const fullText = await readThinkingContent(config);
     const state = await readThinkingState(runDirPath);
     if (options.full) {
@@ -352,7 +389,11 @@ program
   .option("--allow-visible", "Allow visible window for login", false)
   .option("--allow-kill", "Allow killing automation Chrome if stuck", false)
   .action(async (runId, options) => {
-    const runDirPath = runDir(runId, options.runsRoot);
+    const runDirPath = await requireRunDir(runId, options.runsRoot);
+    const status = await readStatusMaybe(runDirPath);
+    if (status && ["completed", "failed", "canceled"].includes(status.state)) {
+      throw new Error(`run ${runId} already ${status.state}`);
+    }
     if (options.allowVisible || options.allowKill) {
       const config = await readJson<RunConfig>(runConfigPath(runDirPath));
       applyRunOverrides(config, {
@@ -372,11 +413,16 @@ program
   .argument("<run_id>", "run id")
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .action(async (runId, options) => {
-    const runDirPath = runDir(runId, options.runsRoot);
-    if (!(await pathExists(runConfigPath(runDirPath)))) {
-      throw new Error("run not found");
+    const runDirPath = await requireRunDir(runId, options.runsRoot);
+    const status = await readStatusMaybe(runDirPath);
+    if (status && ["completed", "failed", "canceled"].includes(status.state)) {
+      throw new Error(`run ${runId} already ${status.state}`);
     }
-    await writeJsonAtomic(path.join(runDirPath, "cancel.json"), {
+    const cancelPath = path.join(runDirPath, "cancel.json");
+    if (await pathExists(cancelPath)) {
+      throw new Error(`run ${runId} already has a cancel request`);
+    }
+    await writeJsonAtomic(cancelPath, {
       canceledAt: nowIso(),
     });
     // eslint-disable-next-line no-console
@@ -389,7 +435,11 @@ program
   .argument("<run_id>", "run id")
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .action(async (runId, options) => {
-    const runDirPath = runDir(runId, options.runsRoot);
+    const runDirPath = await requireRunDir(runId, options.runsRoot);
+    const statusFile = statusPath(runDirPath);
+    if (!(await pathExists(statusFile))) {
+      throw new Error(`status not available for run ${runId}`);
+    }
     let lastState = "";
     while (true) {
       const status = await readJson<StatusPayload>(statusPath(runDirPath));
@@ -414,8 +464,10 @@ program
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .action(async (runId, options) => {
     if (runId) {
-      const runDirPath = runDir(runId, options.runsRoot);
-      const config = await readJson<RunConfig>(runConfigPath(runDirPath));
+      const { runDirPath, config } = await loadRunConfigForRun(
+        runId,
+        options.runsRoot,
+      );
       if (config.browser === "chrome" && !config.debugPort) {
         config.debugPort = await getFreePort();
         await saveRunConfig(config.runPath, config);
@@ -430,6 +482,7 @@ program
             "Run did not complete or never created a conversation.",
         );
       }
+      assertValidUrl(conversationUrl, "conversation URL");
       const targetUrl = conversationUrl;
       await openVisible(config, targetUrl);
       // eslint-disable-next-line no-console
@@ -441,6 +494,7 @@ program
       process.env.ORACLE_DEV === "1"
         ? resolveBaseUrl(undefined)
         : DEFAULT_BASE_URL;
+    assertValidUrl(targetUrl, "base URL");
     const config = buildDefaultOpenConfig(targetUrl);
     await openVisible(config, targetUrl);
     // eslint-disable-next-line no-console
@@ -466,7 +520,7 @@ async function resolveRunInvocation(
     promptParts = argv.slice(1);
     const runDirPath = runDir(runId, options.runsRoot);
     if (!(await pathExists(runConfigPath(runDirPath)))) {
-      throw new Error("run not found");
+      throw new Error(`run not found: ${runId}`);
     }
   }
 
@@ -512,6 +566,9 @@ async function loadPromptFromOptions(
     return prompt;
   }
   if (promptFile) {
+    if (!(await pathExists(promptFile))) {
+      throw new Error(`Prompt file not found: ${promptFile}`);
+    }
     const content = (await readJsonOrText(promptFile))?.trim() ?? "";
     if (!content) throw new Error("Prompt file is empty");
     return content;
@@ -602,7 +659,10 @@ function writeJson(payload: unknown): void {
 
 async function openVisible(config: RunConfig, targetUrl?: string): Promise<void> {
   const { spawn } = await import("child_process");
-  const url = targetUrl ?? config.conversationUrl ?? config.baseUrl ?? DEFAULT_BASE_URL;
+  if (!targetUrl) {
+    throw new Error("Open requires an explicit URL");
+  }
+  const url = targetUrl;
   if (config.browser === "chrome") {
     const args: string[] = [];
     args.push("--no-first-run", "--no-default-browser-check");
@@ -654,6 +714,66 @@ async function readStatusMaybe(
   const statusFile = statusPath(runDirPath);
   if (!(await pathExists(statusFile))) return null;
   return readJson<StatusPayload>(statusFile);
+}
+
+async function requireRunDir(
+  runId: string,
+  runsRoot: string,
+): Promise<string> {
+  const runDirPath = runDir(runId, runsRoot);
+  if (!(await pathExists(runConfigPath(runDirPath)))) {
+    throw new Error(`run not found: ${runId}`);
+  }
+  return runDirPath;
+}
+
+async function loadRunConfigForRun(
+  runId: string,
+  runsRoot: string,
+): Promise<{ runDirPath: string; config: RunConfig }> {
+  const runDirPath = await requireRunDir(runId, runsRoot);
+  const config = await readJson<RunConfig>(runConfigPath(runDirPath));
+  return { runDirPath, config };
+}
+
+async function loadStatusForRun(
+  runId: string,
+  runsRoot: string,
+): Promise<{ runDirPath: string; status: StatusPayload }> {
+  const runDirPath = await requireRunDir(runId, runsRoot);
+  const statusFile = statusPath(runDirPath);
+  if (!(await pathExists(statusFile))) {
+    throw new Error(`status not available for run ${runId}`);
+  }
+  const status = await readJson<StatusPayload>(statusFile);
+  return { runDirPath, status };
+}
+
+function parsePositiveInt(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function resolveBrowserOption(input?: string): "chrome" | "firefox" {
+  if (!input) return "chrome";
+  const normalized = input.trim().toLowerCase();
+  if (normalized === "chrome" || normalized === "firefox") return normalized;
+  throw new Error(`Unknown browser: ${input}`);
+}
+
+function assertValidUrl(value: string, label: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`Invalid ${label}: ${value}`);
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error(`Invalid ${label}: ${value}`);
+  }
 }
 
 function buildDefaultOpenConfig(targetUrl: string): RunConfig {
