@@ -410,18 +410,36 @@ program
 program
   .command("open")
   .description("Open a visible browser window for a run (login / recovery)")
-  .argument("<run_id>", "run id")
+  .argument("[run_id]", "run id (optional)")
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .action(async (runId, options) => {
-    const runDirPath = runDir(runId, options.runsRoot);
-    const config = await readJson<RunConfig>(runConfigPath(runDirPath));
-    if (config.browser === "chrome" && !config.debugPort) {
-      config.debugPort = await getFreePort();
-      await saveRunConfig(config.runPath, config);
+    if (runId) {
+      const runDirPath = runDir(runId, options.runsRoot);
+      const config = await readJson<RunConfig>(runConfigPath(runDirPath));
+      if (config.browser === "chrome" && !config.debugPort) {
+        config.debugPort = await getFreePort();
+        await saveRunConfig(config.runPath, config);
+      }
+      const status = await readStatusMaybe(runDirPath);
+      const targetUrl =
+        status?.conversationUrl ??
+        config.conversationUrl ??
+        config.baseUrl ??
+        DEFAULT_BASE_URL;
+      await openVisible(config, targetUrl);
+      // eslint-disable-next-line no-console
+      console.log(`Opened browser for ${runId}`);
+      return;
     }
-    await openVisible(config);
+
+    const targetUrl =
+      process.env.ORACLE_DEV === "1"
+        ? resolveBaseUrl(undefined)
+        : DEFAULT_BASE_URL;
+    const config = buildDefaultOpenConfig(targetUrl);
+    await openVisible(config, targetUrl);
     // eslint-disable-next-line no-console
-    console.log(`Opened browser for ${runId}`);
+    console.log(`Opened browser at ${targetUrl}`);
   });
 
 program.parseAsync(argv).catch((error) => {
@@ -577,9 +595,9 @@ function writeJson(payload: unknown): void {
   console.log(JSON.stringify(payload, null, 2));
 }
 
-async function openVisible(config: RunConfig): Promise<void> {
+async function openVisible(config: RunConfig, targetUrl?: string): Promise<void> {
   const { spawn } = await import("child_process");
-  const targetUrl = config.conversationUrl ?? config.baseUrl ?? DEFAULT_BASE_URL;
+  const url = targetUrl ?? config.conversationUrl ?? config.baseUrl ?? DEFAULT_BASE_URL;
   if (config.browser === "chrome") {
     const args: string[] = [];
     args.push("--no-first-run", "--no-default-browser-check");
@@ -588,7 +606,7 @@ async function openVisible(config: RunConfig): Promise<void> {
       args.push(`--profile-directory=${config.profile.profileDir}`);
     if (config.debugPort)
       args.push(`--remote-debugging-port=${config.debugPort}`);
-    if (targetUrl) args.push(targetUrl);
+    if (url) args.push(url);
     spawn("open", ["-n", "-a", "Google Chrome", "--args", ...args], {
       stdio: "ignore",
       detached: true,
@@ -600,7 +618,7 @@ async function openVisible(config: RunConfig): Promise<void> {
     if (config.profile.profileDir) {
       args.push("-profile", config.profile.profileDir);
     }
-    if (targetUrl) args.push(targetUrl);
+    if (url) args.push(url);
     const appPath = config.firefoxApp?.appPath ?? "Firefox";
     spawn("open", ["-n", "-a", appPath, "--args", ...args], {
       stdio: "ignore",
@@ -623,4 +641,42 @@ async function getFreePort(): Promise<number> {
     });
     server.on("error", reject);
   });
+}
+
+async function readStatusMaybe(
+  runDirPath: string,
+): Promise<StatusPayload | null> {
+  const statusFile = statusPath(runDirPath);
+  if (!(await pathExists(statusFile))) return null;
+  return readJson<StatusPayload>(statusFile);
+}
+
+function buildDefaultOpenConfig(targetUrl: string): RunConfig {
+  return {
+    runId: "open",
+    createdAt: nowIso(),
+    prompt: "",
+    promptHash: "",
+    browser: "chrome",
+    profile: {
+      kind: "chrome",
+      userDataDir: oracleChromeDataDir(),
+    },
+    headless: false,
+    baseUrl: targetUrl,
+    allowVisible: true,
+    focusOnly: false,
+    allowKill: false,
+    pollMs: DEFAULT_POLL_MS,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    thinking: "extended",
+    attempt: 1,
+    maxAttempts: 1,
+    outDir: "",
+    statusPath: "",
+    resultPath: "",
+    resultJsonPath: "",
+    logPath: "",
+    runPath: "",
+  };
 }
