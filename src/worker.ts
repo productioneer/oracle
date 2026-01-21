@@ -32,9 +32,11 @@ import {
 } from "./notifications/chrome-restart.js";
 import {
   DEFAULT_BASE_URL,
-  FALLBACK_BASE_URL,
   ensureChatGptReady,
+  ensureModelSelected,
   ensureWideViewport,
+  getNextUserTurnNumber,
+  isGenerating,
   navigateToChat,
   ResponseFailedError,
   ResponseStalledError,
@@ -45,6 +47,7 @@ import {
   waitForUserMessage,
   waitForCompletion,
   waitForPromptInput,
+  waitForThinkingPanel,
 } from "./browser/chatgpt.js";
 import { uploadAttachments } from "./browser/attachments.js";
 import {
@@ -142,8 +145,9 @@ async function runAttempt(
   runDir: string,
   recoveryAttempt: number,
 ): Promise<"completed" | "needs_user" | "retry"> {
-  let browser: import("puppeteer").Browser | null = null;
-  let page: import("puppeteer").Page | null = null;
+  let browser: import("playwright").Browser | null = null;
+  let page: import("playwright").Page | null = null;
+  let firefoxServer: import("playwright").BrowserServer | undefined;
   let keepFirefoxAlive = false;
   let chromeReused = false;
   let firefoxApp = config.firefoxApp;
@@ -204,6 +208,7 @@ async function runAttempt(
       browser = connection.browser;
       keepFirefoxAlive = connection.keepAlive;
       firefoxPid = connection.pid;
+      firefoxServer = connection.server;
       const setup = config.allowVisible
         ? null
         : await runFirefoxSetupPhase(appName, firefoxPid, logger);
@@ -262,7 +267,8 @@ async function runAttempt(
           await saveRunConfig(config.runPath, config);
         }
       }
-      page = await browser.newPage();
+      const context = browser.contexts()[0] ?? (await browser.newContext());
+      page = await context.newPage();
     }
     if (config.browser === "chrome") {
       const focusStatus = await applyFocusStrategy({
@@ -296,7 +302,12 @@ async function runAttempt(
     }
 
     await writeStatus(config, "running", "login", "navigating to ChatGPT");
-    await navigateWithFallback(page, config.baseUrl);
+    assertChatGptUrl(config.baseUrl, "baseUrl");
+    if (config.conversationUrl) {
+      assertChatGptUrl(config.conversationUrl, "conversationUrl");
+    }
+    const targetUrl = config.conversationUrl ?? config.baseUrl;
+    await navigateToChat(page, targetUrl);
     await ensureWideViewport(page);
 
     if (!page) {
@@ -304,27 +315,25 @@ async function runAttempt(
     }
     for (let pageAttempt = 0; pageAttempt < 2; pageAttempt += 1) {
       try {
-        const ready = await ensureChatGptReady(page);
-        if (ready.needsCloudflare) {
+        const ready = await ensureChatGptReady(page, logger);
+        if (!ready.ok && ready.reason === "cloudflare") {
           await writeNeedsUser(
             config,
             "cloudflare",
-            "Cloudflare challenge detected",
+            ready.message ?? "Cloudflare challenge detected",
           );
           return "needs_user";
         }
-        if (!ready.loggedIn) {
-          await writeNeedsUser(config, "login", "Login required");
+        if (!ready.ok) {
+          await writeNeedsUser(config, "login", ready.message ?? "Login required");
           return "needs_user";
         }
 
-        await writeStatus(config, "running", "navigate", "opening conversation");
-        if (config.conversationUrl) {
-          await navigateToChat(page, config.conversationUrl);
-        }
+        await writeStatus(config, "running", "navigate", "checking model");
+        await ensureModelSelected(page, logger);
 
         try {
-          await waitForPromptInput(page);
+          await waitForPromptInput(page, 30_000, logger);
         } catch (error) {
           await captureDebugArtifacts(page, config, logger, "prompt-input");
           throw error;
@@ -347,14 +356,23 @@ async function runAttempt(
           config.prompt,
         );
         if (!alreadySubmitted) {
-          try {
-            await waitForIdle(page, {
-              timeoutMs: config.timeoutMs,
-              pollMs: Math.min(config.pollMs, 1000),
-            });
-          } catch (error) {
-            logger(`[prompt] idle wait failed: ${String(error)}`);
-            throw error;
+          if (config.conversationUrl) {
+            const generating = await isGenerating(page);
+            if (generating) {
+              throw new Error(
+                "Previous response still generating. Wait for completion or cancel before sending follow-up.",
+              );
+            }
+          } else {
+            try {
+              await waitForIdle(page, {
+                timeoutMs: config.timeoutMs,
+                pollMs: Math.min(config.pollMs, 1000),
+              });
+            } catch (error) {
+              logger(`[prompt] idle wait failed: ${String(error)}`);
+              throw error;
+            }
           }
           // Upload attachments if any
           if (config.attachments && config.attachments.length > 0) {
@@ -365,7 +383,7 @@ async function runAttempt(
               `uploading ${config.attachments.length} file(s)`,
             );
             try {
-              await uploadAttachments(page, config.attachments);
+              await uploadAttachments(page, config.attachments, logger);
               logger(
                 `[attachments] uploaded ${config.attachments.length} file(s)`,
               );
@@ -378,7 +396,8 @@ async function runAttempt(
           }
 
           await writeStatus(config, "running", "submit", "submitting prompt");
-          const typedValue = await submitPrompt(page, config.prompt);
+          const expectedTurn = await getNextUserTurnNumber(page);
+          const typedValue = await submitPrompt(page, config.prompt, logger);
           if (typedValue.trim() !== config.prompt.trim()) {
             logger(
               `[prompt] mismatch typed="${typedValue}" expected="${config.prompt}"`,
@@ -387,19 +406,26 @@ async function runAttempt(
           const submitted = await waitForUserMessage(
             page,
             config.prompt,
+            expectedTurn,
             8_000,
           );
           if (!submitted) {
             logger("[prompt] user message not detected; retrying submit");
-            await submitPrompt(page, config.prompt);
+            await submitPrompt(page, config.prompt, logger);
           }
           await sleep(1000);
           await maybeCaptureConversationUrl(page, config);
           await saveRunConfig(config.runPath, config);
+          await waitForThinkingPanel(page, logger);
         }
 
         await writeStatus(config, "running", "waiting", "awaiting response");
-        const completion = await waitForCompletionWithCancel(page, config, runDir);
+        const completion = await waitForCompletionWithCancel(
+          page,
+          config,
+          runDir,
+          logger,
+        );
 
         if (
           config.baseUrl.includes("127.0.0.1") ||
@@ -446,7 +472,11 @@ async function runAttempt(
                 allowVisible: config.allowVisible,
                 logger,
               })
-            : await browser.newPage();
+            : await (async () => {
+                const context =
+                  browser.contexts()[0] ?? (await browser.newContext());
+                return context.newPage();
+              })();
       }
     }
     throw new Error("Detached frame retry limit exceeded");
@@ -493,11 +523,14 @@ async function runAttempt(
           if (!config.allowVisible) {
             await runFirefoxSetupPhase(appName, firefoxPid, logger);
           }
-          await browser.disconnect();
+          await disconnectBrowser(browser);
         } else if (config.browser === "chrome" && chromeReused) {
-          await browser.disconnect();
+          await disconnectBrowser(browser);
         } else {
           await browser.close();
+          if (config.browser === "firefox" && firefoxServer) {
+            await firefoxServer.close().catch(() => null);
+          }
         }
       } catch (closeError) {
         logger(`[worker] browser close failed: ${String(closeError)}`);
@@ -514,8 +547,8 @@ async function runAttempt(
 
 async function attemptRecovery(
   config: RunConfig,
-  browser: import("puppeteer").Browser | null,
-  page: import("puppeteer").Page | null,
+  browser: import("playwright").Browser | null,
+  page: import("playwright").Page | null,
   logger: (msg: string) => void,
   runDir: string,
   allowPersonalRestart: boolean,
@@ -748,20 +781,8 @@ async function writeNeedsUser(
   });
 }
 
-async function navigateWithFallback(
-  page: import("puppeteer").Page,
-  baseUrl: string,
-): Promise<void> {
-  try {
-    await navigateToChat(page, baseUrl);
-  } catch (error) {
-    if (baseUrl !== DEFAULT_BASE_URL) throw error;
-    await navigateToChat(page, FALLBACK_BASE_URL);
-  }
-}
-
 async function promptAlreadySubmitted(
-  page: import("puppeteer").Page,
+  page: import("playwright").Page,
   prompt: string,
 ): Promise<boolean> {
   const trimmed = prompt.trim();
@@ -769,19 +790,26 @@ async function promptAlreadySubmitted(
     const nodes = Array.from(
       document.querySelectorAll('[data-message-author-role="user"]'),
     ) as HTMLElement[];
-    if (nodes.length) {
-      return nodes.some((node) => (node.innerText || "").trim() === needle);
-    }
-    const main =
-      (document.querySelector("main") as HTMLElement | null) ??
-      (document.querySelector('[role="main"]') as HTMLElement | null);
-    const haystack = (main?.innerText ?? document.body?.innerText ?? "").trim();
-    return haystack.includes(needle);
+    return nodes.some((node) => (node.innerText || "").trim() === needle);
   }, trimmed);
 }
 
+function assertChatGptUrl(url: string, label: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`Invalid ${label} URL: ${url}`);
+  }
+  if (parsed.origin !== "https://chatgpt.com") {
+    throw new Error(
+      `Unsupported ${label} URL (${url}). Only https://chatgpt.com/ is supported.`,
+    );
+  }
+}
+
 async function captureDebugArtifacts(
-  page: import("puppeteer").Page,
+  page: import("playwright").Page,
   config: RunConfig,
   logger: (msg: string) => void,
   label: string,
@@ -913,7 +941,7 @@ function truncateText(text: string, maxChars: number): string {
 }
 
 async function maybeCaptureConversationUrl(
-  page: import("puppeteer").Page,
+  page: import("playwright").Page,
   config: RunConfig,
 ): Promise<void> {
   const url = page.url();
@@ -927,7 +955,7 @@ async function maybeCaptureConversationUrl(
 }
 
 function attachNetworkTracing(
-  page: import("puppeteer").Page,
+  page: import("playwright").Page,
   logger: (msg: string) => void,
 ): void {
   if (process.env.ORACLE_TRACE_NETWORK !== "1") return;
@@ -983,7 +1011,7 @@ function mergeFocusNeeds(
 }
 
 async function injectTextDocsCapture(
-  page: import("puppeteer").Page,
+  page: import("playwright").Page,
   logger: (msg: string) => void,
 ): Promise<void> {
   const script = () => {
@@ -1014,7 +1042,7 @@ async function injectTextDocsCapture(
     };
   };
   try {
-    await page.evaluateOnNewDocument(script);
+    await page.addInitScript(script);
     await page.evaluate(script);
   } catch (error) {
     logger(`[debug] inject textdocs capture failed: ${String(error)}`);
@@ -1022,9 +1050,10 @@ async function injectTextDocsCapture(
 }
 
 async function waitForCompletionWithCancel(
-  page: import("puppeteer").Page,
+  page: import("playwright").Page,
   config: RunConfig,
   runDir: string,
+  logger: (msg: string) => void,
 ): Promise<import("./browser/chatgpt.js").WaitForCompletionResult> {
   let done = false;
   const heartbeatTimer = setInterval(() => {
@@ -1051,6 +1080,7 @@ async function waitForCompletionWithCancel(
         timeoutMs: config.timeoutMs,
         pollMs: config.pollMs,
         prompt: config.prompt,
+        logger,
       }),
       cancelWatcher,
     ]);
@@ -1067,7 +1097,7 @@ async function waitForCompletionWithCancel(
         if (error instanceof ResponseFailedError) {
           if (resubmitted) throw error;
           resubmitted = true;
-          await resubmitPrompt(page, config);
+          await resubmitPrompt(page, config, logger);
           await maybeCaptureConversationUrl(page, config);
           await saveRunConfig(config.runPath, config);
           continue;
@@ -1085,7 +1115,7 @@ async function waitForCompletionWithCancel(
 }
 
 async function refreshAfterStall(
-  page: import("puppeteer").Page,
+  page: import("playwright").Page,
   config: RunConfig,
 ): Promise<void> {
   await writeStatus(
@@ -1099,19 +1129,37 @@ async function refreshAfterStall(
   await sleep(1000);
 }
 
+async function disconnectBrowser(
+  browser: import("playwright").Browser,
+): Promise<void> {
+  const maybeDisconnect = (browser as any).disconnect;
+  if (typeof maybeDisconnect === "function") {
+    await maybeDisconnect.call(browser);
+  } else {
+    await browser.close();
+  }
+}
+
 async function resubmitPrompt(
-  page: import("puppeteer").Page,
+  page: import("playwright").Page,
   config: RunConfig,
+  logger: (msg: string) => void,
 ): Promise<void> {
   await writeStatus(config, "running", "submit", "resubmitting prompt");
-  await waitForPromptInput(page);
-  const typedValue = await submitPrompt(page, config.prompt);
+  await waitForPromptInput(page, 30_000, logger);
+  const expectedTurn = await getNextUserTurnNumber(page);
+  const typedValue = await submitPrompt(page, config.prompt, logger);
   if (typedValue.trim() !== config.prompt.trim()) {
     // Best-effort; continue even if input doesn't echo exactly.
   }
-  const submitted = await waitForUserMessage(page, config.prompt, 8_000);
+  const submitted = await waitForUserMessage(
+    page,
+    config.prompt,
+    expectedTurn,
+    8_000,
+  );
   if (!submitted) {
-    await submitPrompt(page, config.prompt);
+    await submitPrompt(page, config.prompt, logger);
   }
   await sleep(1000);
 }

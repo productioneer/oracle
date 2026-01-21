@@ -2,8 +2,8 @@ import fs from "fs";
 import { spawn } from "child_process";
 import http from "http";
 import path from "path";
-import type { Browser, Page } from "puppeteer";
-import puppeteer from "puppeteer";
+import { chromium } from "playwright";
+import type { Browser, Page } from "playwright";
 import { sleep } from "../utils/time.js";
 import type { Logger } from "../utils/log.js";
 import { oracleChromeDataDir } from "./profiles.js";
@@ -37,9 +37,9 @@ export async function launchChrome(
       1_000,
     ).catch(() => null);
     if (version?.webSocketDebuggerUrl) {
-      const browser = await puppeteer.connect({
-        browserWSEndpoint: version.webSocketDebuggerUrl,
-      });
+      const browser = await chromium.connectOverCDP(
+        version.webSocketDebuggerUrl,
+      );
       const browserPid = await findChromePid(existingPort, userDataDir);
       return { browser, debugPort: existingPort, browserPid, reused: true };
     }
@@ -80,9 +80,9 @@ export async function launchChrome(
       const version = await fetchJson(
         `http://127.0.0.1:${fallbackPort}/json/version`,
       );
-      const browser = await puppeteer.connect({
-        browserWSEndpoint: version.webSocketDebuggerUrl,
-      });
+      const browser = await chromium.connectOverCDP(
+        version.webSocketDebuggerUrl,
+      );
       const browserPid = await findChromePid(fallbackPort, userDataDir);
       return { browser, debugPort: fallbackPort, browserPid, reused: true };
     }
@@ -93,9 +93,7 @@ export async function launchChrome(
     throw new Error("Chrome debug endpoint missing webSocketDebuggerUrl");
   }
 
-  const browser = await puppeteer.connect({
-    browserWSEndpoint: version.webSocketDebuggerUrl,
-  });
+  const browser = await chromium.connectOverCDP(version.webSocketDebuggerUrl);
   const browserPid = await findChromePid(debugPort, userDataDir);
   return { browser, debugPort, browserPid, reused: false };
 }
@@ -104,57 +102,20 @@ export async function createHiddenPage(
   browser: Browser,
   token: string,
   options: { allowVisible?: boolean; logger?: Logger } = {},
-): Promise<import("puppeteer").Page> {
-  const browserTarget =
-    browser.targets().find((t) => t.type() === "browser") ??
-    browser.targets()[0];
-  if (!browserTarget) {
-    throw new Error("No browser target available for CDP");
-  }
-  const client = await browserTarget.createCDPSession();
-  const url = `data:text/html,oracle-${token}`;
-  let targetId: string;
+): Promise<Page> {
+  const context = browser.contexts()[0] ?? (await browser.newContext());
+  const page = await context.newPage();
   try {
-    const result = await client.send(
-      "Target.createTarget" as any,
-      {
-        url,
-        background: true,
-        hidden: true,
-      } as any,
-    );
-    targetId = result.targetId;
-  } catch (error) {
-    // Fallback when hidden targets are unsupported.
-    const result = await client.send("Target.createTarget", {
-      url,
-      background: true,
+    await page.goto(`data:text/html,oracle-${token}`, {
+      waitUntil: "domcontentloaded",
     });
-    targetId = result.targetId;
+  } catch {
+    // ignore data url failures
   }
-  const target =
-    (await browser
-      .waitForTarget((t) => (t as any)._targetId === targetId, {
-        timeout: 10_000,
-      })
-      .catch(() => null)) ??
-    (await browser
-      .waitForTarget((t) => t.url() === url, { timeout: 10_000 })
-      .catch(() => null));
-  const page = await target?.page();
-  if (page) {
-    if (!options.allowVisible) {
-      await hideChromeWindowForPage(page, options.logger);
-    }
-    return page;
-  }
-
-  // Fallback: create a normal page if hidden target cannot be attached.
-  const fallback = await browser.newPage();
   if (!options.allowVisible) {
-    await hideChromeWindowForPage(fallback, options.logger);
+    await hideChromeWindowForPage(page, options.logger);
   }
-  return fallback;
+  return page;
 }
 
 async function hideChromeWindowForPage(
@@ -166,7 +127,7 @@ async function hideChromeWindowForPage(
   const timeoutMs = 2_000;
   while (Date.now() - start < timeoutMs) {
     try {
-      const client = await page.target().createCDPSession();
+      const client = await page.context().newCDPSession(page);
       const { windowId } = await client.send("Browser.getWindowForTarget");
       await client.send("Browser.setWindowBounds", {
         windowId,

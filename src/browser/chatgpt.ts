@@ -1,9 +1,10 @@
-import type { Page } from "puppeteer";
+import type { Page } from "playwright";
 import { sleep } from "../utils/time.js";
 
 export type ChatGptState = {
-  loggedIn: boolean;
-  needsCloudflare: boolean;
+  ok: boolean;
+  reason?: "cloudflare" | "login";
+  message?: string;
 };
 
 export type WaitForCompletionResult = {
@@ -40,69 +41,132 @@ export class ResponseTimeoutError extends Error {
 }
 
 export const DEFAULT_BASE_URL = "https://chatgpt.com/";
-export const FALLBACK_BASE_URL = "https://chat.openai.com/";
 
 const SELECTORS = {
-  promptInput: "#prompt-textarea",
-  sendButton: 'button[data-testid="send-button"]',
-  actionButtons:
-    '[data-testid="good-response-turn-action-button"], [data-testid="bad-response-turn-action-button"]',
+  promptInputPrimary: "#prompt-textarea",
+  promptInputSecondary: ".ProseMirror, [contenteditable=\"true\"]",
+  sendButtonPrimary: 'button[data-testid="send-button"]',
+  sendButtonSecondary: 'button[aria-label*="Send"]',
+  copyButtonPrimary: '[data-testid="copy-turn-action-button"]',
+  copyButtonSecondary: 'button[aria-label="Copy"]',
   assistantMessage: '[data-message-author-role="assistant"]',
+  userMessage: '[data-message-author-role="user"]',
+  modelSwitcherPrimary: '[data-testid="model-switcher-dropdown-button"]',
+  modelSwitcherSecondary: 'button[aria-label*="Model selector"]',
+  modelOptionPro: '[data-testid="model-switcher-gpt-5-2-pro"]',
+  newChatPrimary: '[data-testid="create-new-chat-button"]',
+  newChatSecondary: 'a[href="/"]',
   composerFooter: '[data-testid="composer-footer-actions"]',
+  thinkingTriggerExtended: 'button[aria-label*="Extended thinking"]',
+  thinkingTriggerStandard: 'button[aria-label*="Pro"]',
   thinkingMenuItem: '[role="menuitemradio"]',
   sourcesHeader: '[data-testid="bar-search-sources-header"]',
+  sidebarClose: '[data-testid="close-button"]',
 };
 
 const MIN_VIEWPORT_WIDTH = 1024;
 const WIDE_VIEWPORT = { width: 1280, height: 800 };
+const RESPONSE_STABILITY_MS = 2000;
+const THINKING_PANEL_INITIAL_WAIT_MS = 15_000;
+const THINKING_PANEL_RETRY_WAIT_MS = 10_000;
 
-const NO_ACTION_AFTER_STOP_POLLS = 2;
+const loggedSelectorMismatches = new Set<string>();
+
+type SelectorPair = {
+  name: string;
+  primary: string;
+  secondary?: string;
+};
+
+const SELECTOR_PAIRS = {
+  promptInput: {
+    name: "promptInput",
+    primary: SELECTORS.promptInputPrimary,
+    secondary: SELECTORS.promptInputSecondary,
+  },
+  sendButton: {
+    name: "sendButton",
+    primary: SELECTORS.sendButtonPrimary,
+    secondary: SELECTORS.sendButtonSecondary,
+  },
+  copyButton: {
+    name: "copyButton",
+    primary: SELECTORS.copyButtonPrimary,
+    secondary: SELECTORS.copyButtonSecondary,
+  },
+  modelSwitcher: {
+    name: "modelSwitcher",
+    primary: SELECTORS.modelSwitcherPrimary,
+    secondary: SELECTORS.modelSwitcherSecondary,
+  },
+  newChat: {
+    name: "newChat",
+    primary: SELECTORS.newChatPrimary,
+    secondary: SELECTORS.newChatSecondary,
+  },
+} satisfies Record<string, SelectorPair>;
 
 export async function navigateToChat(page: Page, url: string): Promise<void> {
   await page.goto(url, { waitUntil: "domcontentloaded" });
 }
 
-export async function ensureChatGptReady(page: Page): Promise<ChatGptState> {
+export async function ensureChatGptReady(
+  page: Page,
+  logger?: (message: string) => void,
+): Promise<ChatGptState> {
   const needsCloudflare = await detectCloudflare(page);
-  if (needsCloudflare) {
-    return { loggedIn: false, needsCloudflare: true };
-  }
-  const loggedIn = !(await detectLogin(page));
-  return { loggedIn, needsCloudflare: false };
-}
+  const hasModelSwitcher = await selectorExists(page, SELECTOR_PAIRS.modelSwitcher, logger);
+  const hasModelOption = await page
+    .locator(SELECTORS.modelOptionPro)
+    .count()
+    .then((count) => count > 0)
+    .catch(() => false);
+  const hasNewChat = await selectorExists(page, SELECTOR_PAIRS.newChat, logger, {
+    requireText: "new chat",
+  });
 
-export async function detectLogin(page: Page): Promise<boolean> {
-  const url = page.url();
-  if (url.includes("login") || url.includes("auth")) return true;
-  const hasEmailInput = await page.$(
-    'input[type="email"], input[name="username"]',
-  );
-  if (hasEmailInput) return true;
-  const bodyText = await page.evaluate(() => document.body.innerText || "");
-  return /log in|sign in/i.test(bodyText);
+  if (hasModelSwitcher && hasModelOption && hasNewChat) {
+    return { ok: true };
+  }
+
+  const message = needsCloudflare
+    ? "Cloudflare challenge detected. Complete the check in the browser and retry."
+    : "Login required or session not ready. Ensure ChatGPT is logged in for the automation profile.";
+
+  return {
+    ok: false,
+    reason: needsCloudflare ? "cloudflare" : "login",
+    message,
+  };
 }
 
 export async function detectCloudflare(page: Page): Promise<boolean> {
-  const bodyText = await page.evaluate(() => document.body.innerText || "");
+  const bodyText = await page.evaluate(() => document.body?.innerText || "");
   return /cloudflare|just a moment|checking your browser/i.test(bodyText);
 }
 
 export async function waitForPromptInput(
   page: Page,
   timeoutMs = 30_000,
+  logger?: (message: string) => void,
 ): Promise<void> {
+  const selector = await waitForSelectorPair(page, SELECTOR_PAIRS.promptInput, logger, {
+    timeoutMs,
+    state: "attached",
+  });
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const input = await page.$(SELECTORS.promptInput);
-    if (input) {
-      const canType = await page.evaluate((el) => {
+    const canType = await page
+      .evaluate((sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return false;
         if (el instanceof HTMLTextAreaElement) return !el.disabled;
         const contentEditable = el.getAttribute("contenteditable");
         const ariaDisabled = el.getAttribute("aria-disabled");
         return contentEditable !== "false" && ariaDisabled !== "true";
-      }, input);
-      if (canType) return;
-    }
+      }, selector)
+      .catch(() => false);
+    if (canType) return;
     await sleep(500);
   }
   throw new Error("Prompt input not available");
@@ -125,28 +189,62 @@ export async function waitForIdle(
   );
 }
 
+export async function ensureModelSelected(
+  page: Page,
+  logger?: (message: string) => void,
+): Promise<void> {
+  const headerText = await page
+    .evaluate(() => {
+      const span = document.querySelector("#page-header span") as HTMLElement | null;
+      return span?.innerText ?? "";
+    })
+    .catch(() => "");
+  if (/5\.2\s*pro/i.test(headerText)) return;
+
+  const selector = await waitForSelectorPair(page, SELECTOR_PAIRS.modelSwitcher, logger, {
+    timeoutMs: 15_000,
+    state: "visible",
+  });
+  await page.locator(selector).click();
+  await page.locator(SELECTORS.modelOptionPro).waitFor({ state: "visible", timeout: 15_000 });
+  await page.locator(SELECTORS.modelOptionPro).click();
+  await page.waitForFunction(
+    () => {
+      const span = document.querySelector("#page-header span") as HTMLElement | null;
+      return (span?.innerText ?? "").includes("5.2 Pro");
+    },
+    undefined,
+    { timeout: 15_000 },
+  );
+}
+
 export async function setThinkingMode(
   page: Page,
   mode: ThinkingMode,
 ): Promise<boolean> {
   return page.evaluate(
-    (desired, selectors) => {
+    ({
+      desired,
+      selectors,
+    }: {
+      desired: ThinkingMode;
+      selectors: typeof SELECTORS;
+    }) => {
       const footer = document.querySelector(selectors.composerFooter);
       if (!footer) return false;
-      const buttons = Array.from(
-        footer.querySelectorAll("button"),
-      ) as HTMLButtonElement[];
-      const toggle = buttons.find((button) =>
-        /pro|extended thinking/i.test(button.innerText || ""),
-      );
-      if (!toggle) return false;
-      const label = (toggle.innerText || "").toLowerCase();
-      const isExtended = label.includes("extended");
-      if (
-        (desired === "extended" && isExtended) ||
-        (desired === "standard" && !isExtended)
-      )
-        return true;
+      const toggle = footer.querySelector(
+        desired === "extended"
+          ? selectors.thinkingTriggerStandard
+          : selectors.thinkingTriggerExtended,
+      ) as HTMLButtonElement | null;
+      if (!toggle) {
+        const already = footer.querySelector(
+          desired === "extended"
+            ? selectors.thinkingTriggerExtended
+            : selectors.thinkingTriggerStandard,
+        );
+        return Boolean(already);
+      }
       toggle.click();
       const items = Array.from(
         document.querySelectorAll(selectors.thinkingMenuItem),
@@ -157,407 +255,201 @@ export async function setThinkingMode(
       target.click();
       return true;
     },
-    mode,
-    SELECTORS,
+    {
+      desired: mode,
+      selectors: SELECTORS,
+    },
   );
 }
 
 export async function submitPrompt(
   page: Page,
   prompt: string,
+  logger?: (message: string) => void,
 ): Promise<string> {
-  await waitForPromptInput(page, 30_000);
+  await waitForPromptInput(page, 30_000, logger);
   const normalizedPrompt = prompt.replace(/\r\n/g, "\n");
-  // for multiline content, set innerHTML directly (faster), fallback to character-by-character
-  const isMultiline =
-    normalizedPrompt.includes("\n") || normalizedPrompt.includes("\t");
-  // set entire content at once for multiline prompts
-  const setFullContent = async (content: string) =>
-    page.evaluate(
-      (selectors, text) => {
-        const el = document.querySelector(selectors.promptInput);
-        if (!el) return false;
-        if (el instanceof HTMLTextAreaElement) {
-          const textarea = el;
-          const setter = Object.getOwnPropertyDescriptor(
-            HTMLTextAreaElement.prototype,
-            "value",
-          )?.set;
-          if (setter) {
-            setter.call(textarea, text);
-          } else {
-            textarea.value = text;
-          }
-          const inputEvent =
-            typeof InputEvent === "function"
-              ? new InputEvent("input", {
-                  bubbles: true,
-                  data: text,
-                  inputType: "insertText",
-                })
-              : new Event("input", { bubbles: true });
-          textarea.dispatchEvent(inputEvent);
-          textarea.dispatchEvent(new Event("change", { bubbles: true }));
-          return true;
-        }
-        // contenteditable: use <br> for newlines
-        const div = el as HTMLElement;
-        const lines = text.split("\n");
-        const html = lines
-          .map((line) => {
-            // escape HTML entities
-            return line
-              .replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;");
-          })
-          .join("<br>");
-        div.innerHTML = html;
-        const divInputEvent =
-          typeof InputEvent === "function"
-            ? new InputEvent("input", {
-                bubbles: true,
-                data: text,
-                inputType: "insertText",
-              })
-            : new Event("input", { bubbles: true });
-        div.dispatchEvent(divInputEvent);
-        div.dispatchEvent(new Event("change", { bubbles: true }));
-        // set cursor at end
-        const selection = window.getSelection();
-        if (selection) {
-          const range = document.createRange();
-          range.selectNodeContents(div);
-          range.collapse(false);
-          selection.removeAllRanges();
-          selection.addRange(range);
-        }
-        return true;
-      },
-      SELECTORS,
-      content,
-    );
+  const preparedPrompt = normalizedPrompt.replace(/\t/g, "  ");
   const normalizeForCompare = (value: string) =>
     value
       .replace(/\r\n/g, "\n")
       .replace(/\u00a0/g, " ")
       .replace(/\t/g, "  ");
+
+  const selector = await waitForSelectorPair(page, SELECTOR_PAIRS.promptInput, logger, {
+    timeoutMs: 30_000,
+    state: "visible",
+  });
+  const input = page.locator(selector);
+
+  const clearInput = async () => {
+    await input.click();
+    const modifier = process.platform === "darwin" ? "Meta" : "Control";
+    await page.keyboard.press(`${modifier}+A`);
+    await page.keyboard.press("Backspace");
+  };
+
   const readInputValue = async () =>
-    page.evaluate((selectors) => {
-      const el = document.querySelector(selectors.promptInput);
+    page.evaluate((sel) => {
+      const el = document.querySelector(sel);
       if (!el) return "";
       if (el instanceof HTMLTextAreaElement) return el.value;
-      const text = (el as HTMLElement).innerText;
-      return text ?? (el as HTMLElement).textContent ?? "";
-    }, SELECTORS);
-  const clearInput = async () =>
-    page.evaluate((selectors) => {
-      const el = document.querySelector(selectors.promptInput);
-      if (!el) return false;
-      if (el instanceof HTMLTextAreaElement) {
-        const textarea = el as HTMLTextAreaElement;
-        const setter = Object.getOwnPropertyDescriptor(
-          HTMLTextAreaElement.prototype,
-          "value",
-        )?.set;
-        if (setter) {
-          setter.call(textarea, "");
-        } else {
-          textarea.value = "";
-        }
-        const inputEvent =
-          typeof InputEvent === "function"
-            ? new InputEvent("input", {
-                bubbles: true,
-                data: "",
-                inputType: "deleteByCut",
-              })
-            : new Event("input", { bubbles: true });
-        textarea.dispatchEvent(inputEvent);
-        textarea.dispatchEvent(new Event("change", { bubbles: true }));
-        textarea.focus();
-        textarea.setSelectionRange(0, 0);
-        return true;
-      }
-      // contenteditable div - set text content and dispatch events
-      const div = el as HTMLElement;
-      div.textContent = "";
-      const inputEvent =
-        typeof InputEvent === "function"
-          ? new InputEvent("input", {
-              bubbles: true,
-              data: "",
-              inputType: "deleteByCut",
-            })
-          : new Event("input", { bubbles: true });
-      div.dispatchEvent(inputEvent);
-      div.dispatchEvent(new Event("change", { bubbles: true }));
-      if (typeof div.focus === "function") {
-        div.focus();
-      }
-      const selection = window.getSelection();
-      if (selection) {
-        const range = document.createRange();
-        range.selectNodeContents(div);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      }
-      return true;
-    }, SELECTORS);
-  const ensureFocused = async () => {
-    await page.focus(SELECTORS.promptInput).catch(() => null);
-    const focused = await page
-      .evaluate((selectors) => {
-        const el = document.querySelector(selectors.promptInput);
-        return el ? document.activeElement === el : false;
-      }, SELECTORS)
-      .catch(() => false);
-    if (!focused) {
-      await page.click(SELECTORS.promptInput).catch(() => null);
-    }
-  };
-  const sendText = async (text: string, _delay = 0) => {
-    if (!text) return;
-    await ensureFocused();
-    // use DOM manipulation for reliable text insertion in contenteditable
-    await page.evaluate(
-      (selectors, textToInsert) => {
-        const el = document.querySelector(selectors.promptInput);
-        if (!el) return;
-        if (el instanceof HTMLTextAreaElement) {
-          const textarea = el;
-          const start = textarea.selectionStart ?? textarea.value.length;
-          const end = textarea.selectionEnd ?? textarea.value.length;
-          const next =
-            textarea.value.slice(0, start) +
-            textToInsert +
-            textarea.value.slice(end);
-          const setter = Object.getOwnPropertyDescriptor(
-            HTMLTextAreaElement.prototype,
-            "value",
-          )?.set;
-          if (setter) {
-            setter.call(textarea, next);
-          } else {
-            textarea.value = next;
-          }
-          const inputEvent =
-            typeof InputEvent === "function"
-              ? new InputEvent("input", {
-                  bubbles: true,
-                  data: textToInsert,
-                  inputType: "insertText",
-                })
-              : new Event("input", { bubbles: true });
-          textarea.dispatchEvent(inputEvent);
-          textarea.dispatchEvent(new Event("change", { bubbles: true }));
-          const pos = start + textToInsert.length;
-          textarea.setSelectionRange(pos, pos);
-          return;
-        }
-        // contenteditable div
-        const div = el as HTMLElement;
-        const selection = window.getSelection();
-        if (!selection) return;
-        let range: Range;
-        // ensure selection is inside the div, otherwise set cursor at end
-        if (
-          selection.rangeCount > 0 &&
-          div.contains(selection.anchorNode)
-        ) {
-          range = selection.getRangeAt(0);
-        } else {
-          range = document.createRange();
-          range.selectNodeContents(div);
-          range.collapse(false);
-        }
-        range.deleteContents();
-        const textNode = document.createTextNode(textToInsert);
-        range.insertNode(textNode);
-        range.setStartAfter(textNode);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
-        const divInputEvent =
-          typeof InputEvent === "function"
-            ? new InputEvent("input", {
-                bubbles: true,
-                data: textToInsert,
-                inputType: "insertText",
-              })
-            : new Event("input", { bubbles: true });
-        div.dispatchEvent(divInputEvent);
-        div.dispatchEvent(new Event("change", { bubbles: true }));
-      },
-      SELECTORS,
-      text,
-    );
-  };
-  const insertTab = async () => {
-    await ensureFocused();
-    try {
-      await page.keyboard.sendCharacter("\t");
-    } catch {
-      await page.type(SELECTORS.promptInput, "  ", { delay: 0 });
-    }
-    await ensureFocused();
-  };
-  const insertNewline = async () => {
-    await ensureFocused();
-    await page.evaluate((selectors) => {
-      const el = document.querySelector(selectors.promptInput);
-      if (!el) return false;
-      if (el instanceof HTMLTextAreaElement) {
-        const textarea = el as HTMLTextAreaElement;
-        const start = textarea.selectionStart ?? textarea.value.length;
-        const end = textarea.selectionEnd ?? textarea.value.length;
-        const next =
-          textarea.value.slice(0, start) + "\n" + textarea.value.slice(end);
-        const setter = Object.getOwnPropertyDescriptor(
-          HTMLTextAreaElement.prototype,
-          "value",
-        )?.set;
-        if (setter) {
-          setter.call(textarea, next);
-        } else {
-          textarea.value = next;
-        }
-        const inputEvent =
-          typeof InputEvent === "function"
-            ? new InputEvent("input", {
-                bubbles: true,
-                data: "\n",
-                inputType: "insertLineBreak",
-              })
-            : new Event("input", { bubbles: true });
-        textarea.dispatchEvent(inputEvent);
-        textarea.dispatchEvent(new Event("change", { bubbles: true }));
-        const pos = start + 1;
-        textarea.setSelectionRange(pos, pos);
-        return true;
-      }
-      const div = el as HTMLElement;
-      const selection = window.getSelection();
-      if (!selection) return false;
-      const range =
-        selection.rangeCount > 0
-          ? selection.getRangeAt(0)
-          : document.createRange();
-      range.deleteContents();
-      const br = document.createElement("br");
-      range.insertNode(br);
-      range.setStartAfter(br);
-      range.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      const inputEvent =
-        typeof InputEvent === "function"
-          ? new InputEvent("input", {
-              bubbles: true,
-              data: "\n",
-              inputType: "insertLineBreak",
-            })
-          : new Event("input", { bubbles: true });
-      div.dispatchEvent(inputEvent);
-      div.dispatchEvent(new Event("change", { bubbles: true }));
-      return true;
-    }, SELECTORS);
-    await ensureFocused();
-  };
-  const typeMultiline = async (value: string) => {
-    const lines = value.split("\n");
-    for (let i = 0; i < lines.length; i += 1) {
-      const segments = lines[i].split("\t");
-      for (let j = 0; j < segments.length; j += 1) {
-        await sendText(segments[j], 2);
-        if (j < segments.length - 1) {
-          await insertTab();
-        }
-      }
-      if (i < lines.length - 1) {
-        await insertNewline();
-      }
-    }
-  };
+      return (el as HTMLElement).innerText || "";
+    }, selector);
 
   let typedValue = "";
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    await waitForPromptInput(page, 10_000);
-    await ensureFocused();
-    const cleared = await clearInput();
-    if (!cleared) throw new Error("Prompt input not found");
-    await ensureFocused();
-
-    if (isMultiline) {
-      if (attempt === 0) {
-        // try direct content set first (faster)
-        await setFullContent(normalizedPrompt);
-      } else {
-        // fallback to character-by-character typing
-        await typeMultiline(normalizedPrompt);
-      }
-    } else {
-      await sendText(normalizedPrompt, 5);
-    }
+    await clearInput();
+    await input.click();
+    await page.keyboard.type(preparedPrompt, { delay: 30 });
     await sleep(50);
     typedValue = await readInputValue();
-    if (
-      !isMultiline ||
-      normalizeForCompare(typedValue) === normalizeForCompare(normalizedPrompt)
-    ) {
+    if (normalizeForCompare(typedValue) === normalizeForCompare(preparedPrompt)) {
       break;
     }
   }
-  const clicked = await clickSendIfPresent(page);
-  if (!clicked) {
-    await page.keyboard.press("Enter");
+
+  if (normalizeForCompare(typedValue) !== normalizeForCompare(preparedPrompt)) {
+    throw new Error("Prompt entry mismatch after typing");
   }
+
+  await clickSendButton(page, logger);
   return typedValue;
+}
+
+export async function getNextUserTurnNumber(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const turns = Array.from(
+      document.querySelectorAll('[data-testid^="conversation-turn-"]'),
+    ) as HTMLElement[];
+    const numbers = turns
+      .map((el) => {
+        const id = el.getAttribute("data-testid") || "";
+        const match = id.match(/conversation-turn-(\d+)/);
+        return match ? Number(match[1]) : NaN;
+      })
+      .filter((value) => Number.isFinite(value)) as number[];
+    const max = numbers.length ? Math.max(...numbers) : 0;
+    if (max <= 0) return 1;
+    return max % 2 === 0 ? max + 1 : max + 2;
+  });
 }
 
 export async function waitForUserMessage(
   page: Page,
   prompt: string,
+  expectedTurn: number,
   timeoutMs = 10_000,
 ): Promise<boolean> {
+  const selector = `[data-testid="conversation-turn-${expectedTurn}"]`;
   const start = Date.now();
-  const needle = prompt.trim();
   while (Date.now() - start < timeoutMs) {
-    const found = await page.evaluate((text) => {
-      const nodes = Array.from(
-        document.querySelectorAll('[data-message-author-role="user"]'),
-      ) as HTMLElement[];
-      if (nodes.length) {
-        return nodes.some((node) => (node.innerText || "").trim() === text);
-      }
-      const main =
-        (document.querySelector("main") as HTMLElement | null) ??
-        (document.querySelector('[role="main"]') as HTMLElement | null);
-      const haystack = (
-        main?.innerText ??
-        document.body?.innerText ??
-        ""
-      ).trim();
-      return haystack.includes(text);
-    }, needle);
+    const found = await page.evaluate(
+      ({
+        selector,
+        text,
+        userSelector,
+      }: {
+        selector: string;
+        text: string;
+        userSelector: string;
+      }) => {
+        const container = document.querySelector(selector);
+        if (!container) return false;
+        const user = container.querySelector(userSelector) as HTMLElement | null;
+        if (!user) return false;
+        const content = (user.innerText || "").trim();
+        return content === text.trim();
+      },
+      {
+        selector,
+        text: prompt,
+        userSelector: SELECTORS.userMessage,
+      },
+    );
     if (found) return true;
     await sleep(300);
   }
   return false;
 }
 
-async function clickSendIfPresent(page: Page): Promise<boolean> {
-  return page.evaluate((selectors) => {
-    const button = document.querySelector(
-      selectors.sendButton,
-    ) as HTMLButtonElement | null;
-    if (button && !button.disabled) {
-      button.click();
+export async function waitForThinkingPanel(
+  page: Page,
+  logger?: (message: string) => void,
+): Promise<boolean> {
+  try {
+    try {
+      await page.waitForSelector("text=Pro thinking", {
+        timeout: THINKING_PANEL_INITIAL_WAIT_MS,
+      });
+    } catch {
+      // continue to attempt open
+    }
+
+    if (await hasProThinking(page)) {
+      await ensureSidebarCloseButton(page);
+      return true;
+    }
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const clicked = await clickLatestThoughtHeader(page);
+      if (!clicked) break;
+      await sleep(THINKING_PANEL_RETRY_WAIT_MS);
+      if (await hasProThinking(page)) {
+        await ensureSidebarCloseButton(page);
+        return true;
+      }
+    }
+
+    await ensureSidebarCloseButton(page);
+    return true;
+  } catch (error) {
+    logger?.(`[thinking] panel check failed: ${String(error)}`);
+    return false;
+  }
+}
+
+async function ensureSidebarCloseButton(page: Page): Promise<void> {
+  await page.locator(SELECTORS.sidebarClose).waitFor({ state: "visible", timeout: 10_000 });
+}
+
+async function hasProThinking(page: Page): Promise<boolean> {
+  return page
+    .locator("text=Pro thinking")
+    .count()
+    .then((count) => count > 0)
+    .catch(() => false);
+}
+
+async function clickLatestThoughtHeader(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const elements = Array.from(document.querySelectorAll("div, span, button")) as HTMLElement[];
+    const headers = elements.filter((el) => {
+      const text = (el.textContent || "").trim();
+      return /^thought for \d+/i.test(text) && text.length < 50;
+    });
+    const header = headers.length ? headers[headers.length - 1] : null;
+    if (header) {
+      header.click();
       return true;
     }
     return false;
-  }, SELECTORS);
+  });
+}
+
+async function clickSendButton(page: Page, logger?: (message: string) => void): Promise<void> {
+  const selector = await waitForSelectorPair(page, SELECTOR_PAIRS.sendButton, logger, {
+    timeoutMs: 15_000,
+    state: "visible",
+  });
+  const button = page.locator(selector);
+  const disabled = await button.evaluate((el) =>
+    el instanceof HTMLButtonElement ? el.disabled : false,
+  );
+  if (disabled) {
+    throw new Error("Send button is disabled");
+  }
+  await button.click();
 }
 
 export async function waitForCompletion(
@@ -566,69 +458,69 @@ export async function waitForCompletion(
     timeoutMs: number;
     pollMs: number;
     prompt?: string;
+    logger?: (message: string) => void;
   },
 ): Promise<WaitForCompletionResult> {
   const start = Date.now();
   let lastText = "";
   let lastIndex = -1;
-  let seenStop = false;
-  let seenAssistant = false;
-  let noActionAfterStop = 0;
+  let lastChangeAt = Date.now();
+  let sawAssistant = false;
+  let sawGenerating = false;
+
+  const basePollMs = Number.isFinite(options.pollMs) ? options.pollMs : 1000;
+  const pollMs = Math.max(500, Math.min(basePollMs, 1000));
 
   while (Date.now() - start < options.timeoutMs) {
-    const snapshot = await getCompletionSnapshot(page);
+    const snapshot = await getCompletionSnapshot(page, options.logger);
     if (snapshot.innerWidth > 0 && snapshot.innerWidth < MIN_VIEWPORT_WIDTH) {
       await ensureWideViewport(page);
     }
-    const {
-      lastAssistantText,
-      lastAssistantIndex,
-      actionVisible,
-      stopVisible,
-    } = snapshot;
 
-    if (
-      lastAssistantText &&
-      (lastAssistantText !== lastText || lastAssistantIndex !== lastIndex)
-    ) {
-      lastText = lastAssistantText;
-      lastIndex = lastAssistantIndex;
-      seenAssistant = true;
+    if (snapshot.lastAssistantText) {
+      if (
+        snapshot.lastAssistantText !== lastText ||
+        snapshot.lastAssistantIndex !== lastIndex
+      ) {
+        lastText = snapshot.lastAssistantText;
+        lastIndex = snapshot.lastAssistantIndex;
+        lastChangeAt = Date.now();
+        sawAssistant = true;
+      }
     }
 
-    if (actionVisible && lastText) {
+    if (snapshot.generating) {
+      sawGenerating = true;
+    }
+
+    const stable = Date.now() - lastChangeAt >= RESPONSE_STABILITY_MS;
+    if (snapshot.copyVisible && lastText && stable) {
       return {
-        content: lastAssistantText || lastText,
-        assistantIndex: lastAssistantIndex ?? lastIndex,
+        content: snapshot.lastAssistantText || lastText,
+        assistantIndex: snapshot.lastAssistantIndex ?? lastIndex,
         conversationUrl: page.url(),
       };
     }
 
-    if (stopVisible) {
-      seenStop = true;
-      noActionAfterStop = 0;
-    } else if (seenStop && !actionVisible) {
-      noActionAfterStop += 1;
-      if (noActionAfterStop >= NO_ACTION_AFTER_STOP_POLLS && seenAssistant) {
-        throw new ResponseFailedError("Response failed or canceled");
-      }
+    if (!snapshot.generating && !snapshot.copyVisible && sawAssistant) {
+      throw new ResponseFailedError("Response failed or canceled");
     }
 
-    await sleep(options.pollMs);
+    await sleep(pollMs);
   }
 
-  const snapshot = await getCompletionSnapshot(page);
-  if (snapshot.actionVisible && snapshot.lastAssistantText) {
+  const snapshot = await getCompletionSnapshot(page, options.logger);
+  if (snapshot.copyVisible && snapshot.lastAssistantText) {
     return {
       content: snapshot.lastAssistantText,
       assistantIndex: snapshot.lastAssistantIndex,
       conversationUrl: page.url(),
     };
   }
-  if (snapshot.stopVisible) {
-    throw new ResponseStalledError("Response stalled with stop button visible");
+  if (snapshot.generating) {
+    throw new ResponseStalledError("Response stalled with stop/update button visible");
   }
-  if (seenStop || seenAssistant) {
+  if (sawGenerating || sawAssistant) {
     throw new ResponseFailedError("Response failed or canceled");
   }
   throw new ResponseTimeoutError("Timed out waiting for completion");
@@ -636,12 +528,12 @@ export async function waitForCompletion(
 
 export async function isGenerating(page: Page): Promise<boolean> {
   const snapshot = await getCompletionSnapshot(page);
-  return snapshot.stopVisible;
+  return snapshot.generating;
 }
 
 export async function isResponseComplete(page: Page): Promise<boolean> {
   const snapshot = await getCompletionSnapshot(page);
-  return snapshot.actionVisible;
+  return snapshot.copyVisible;
 }
 
 export async function getLastAssistantMessage(
@@ -658,80 +550,34 @@ export async function getLastAssistantMessage(
 }
 
 export async function getThinkingContent(page: Page): Promise<string> {
-  // Helper to find thinking sidebar (not chat history)
-  const findThinkingSidebar = () => {
-    return page.evaluate(() => {
-      const sidebars = Array.from(
-        document.querySelectorAll(".bg-token-sidebar-surface-primary"),
-      ) as HTMLElement[];
-      const found = sidebars.find((s) => {
-        if ((s.innerText?.length || 0) < 50) return false;
-        // Exclude chat history sidebar (has "Your chats" label)
-        const hasYourChats = Array.from(s.querySelectorAll("*")).some(
-          (el) => (el.textContent || "").trim().toLowerCase() === "your chats",
-        );
-        if (hasYourChats) return false;
-        // Must have thinking labels
-        const hasThinkingLabel = Array.from(s.querySelectorAll("*")).some(
-          (el) => {
-            const text = (el.textContent || "").trim().toLowerCase();
-            return text === "pro thinking" || text === "activity";
-          },
-        );
-        return hasThinkingLabel;
-      });
-      return found?.innerText?.trim() || null;
-    });
-  };
-
-  // Check if sidebar is already open
-  let content = await findThinkingSidebar();
+  let content = await readThinkingSections(page);
   if (content) return content;
 
-  // Try clicking the "Thought for" header to open sidebar
-  const clicked = await page.evaluate(() => {
-    const elements = Array.from(
-      document.querySelectorAll("span, button"),
-    ) as HTMLElement[];
-    const headers = elements.filter((el) => {
-      const text = (el.textContent || "").trim();
-      // Must be short (< 50 chars) to avoid hitting transcript text
-      return /^thought for /i.test(text) && text.length < 50;
-    });
-    const header = headers.length ? headers[headers.length - 1] : null;
-    if (header) {
-      header.click();
-      return true;
-    }
-    return false;
-  });
-
+  const clicked = await clickLatestThoughtHeader(page);
   if (clicked) {
-    // Wait for sidebar to appear after click
-    await new Promise((r) => setTimeout(r, 500));
-    content = await findThinkingSidebar();
+    await sleep(500);
+    content = await readThinkingSections(page);
     if (content) return content;
   }
 
-  // Fallback: look for Pro thinking and sources sections in main content
+  return "";
+}
+
+async function readThinkingSections(page: Page): Promise<string> {
   return page.evaluate((selectors) => {
     const sections: string[] = [];
 
     const proThinking = findProThinking();
     if (proThinking) {
-      const container =
-        proThinking.closest("section") ?? proThinking.parentElement;
+      const container = proThinking.closest("section") ?? proThinking.parentElement;
       const text =
         container?.innerText?.trim() || proThinking.innerText?.trim() || "";
       if (text) sections.push(text);
     }
 
-    const sourcesHeader = document.querySelector(
-      selectors.sourcesHeader,
-    ) as HTMLElement | null;
+    const sourcesHeader = document.querySelector(selectors.sourcesHeader) as HTMLElement | null;
     if (sourcesHeader) {
-      const container =
-        sourcesHeader.closest("section") ?? sourcesHeader.parentElement;
+      const container = sourcesHeader.closest("section") ?? sourcesHeader.parentElement;
       const text =
         container?.innerText?.trim() || sourcesHeader.innerText?.trim() || "";
       if (text) sections.push(text);
@@ -740,12 +586,11 @@ export async function getThinkingContent(page: Page): Promise<string> {
     return sections.join("\n\n").trim();
 
     function findProThinking(): HTMLElement | null {
-      const elements = Array.from(
-        document.querySelectorAll("div, span, p"),
-      ) as HTMLElement[];
+      const elements = Array.from(document.querySelectorAll("div, span, p")) as HTMLElement[];
       return (
         elements.find((el) => {
           const text = (el.textContent || "").trim();
+          if (!text) return false;
           if (text === "Pro thinking") return true;
           if (text.length < 200 && /^pro thinking/i.test(text)) return true;
           return false;
@@ -757,51 +602,50 @@ export async function getThinkingContent(page: Page): Promise<string> {
 
 export async function ensureWideViewport(page: Page): Promise<void> {
   try {
-    const current = await page.evaluate(() => window.innerWidth);
-    // Only set viewport if below minimum - don't shrink an already-wide window
-    if (current < MIN_VIEWPORT_WIDTH) {
-      await page.setViewport(WIDE_VIEWPORT);
+    const current = page.viewportSize();
+    if (!current) return;
+    if (current.width < MIN_VIEWPORT_WIDTH) {
+      await page.setViewportSize(WIDE_VIEWPORT);
     }
   } catch {
     // ignore
   }
 }
 
-async function getCompletionSnapshot(page: Page): Promise<{
-  actionVisible: boolean;
-  stopVisible: boolean;
+async function getCompletionSnapshot(
+  page: Page,
+  logger?: (message: string) => void,
+): Promise<{
+  copyVisible: boolean;
+  generating: boolean;
   lastAssistantText: string;
   lastAssistantIndex: number;
   innerWidth: number;
 }> {
-  return page.evaluate((selectors) => {
-    const actionButton = document.querySelector(
-      selectors.actionButtons,
-    ) as HTMLElement | null;
-    const actionVisible = actionButton ? isVisible(actionButton) : false;
+  const snapshot = await page.evaluate((selectors) => {
+    const copyPrimary = document.querySelector(selectors.copyButtonPrimary);
+    const copySecondary = document.querySelector(selectors.copyButtonSecondary);
+    const copyElement = copyPrimary || copySecondary;
+    const copyVisible = copyElement ? isVisible(copyElement as HTMLElement) : false;
+    const copyMismatch = Boolean(
+      copyPrimary && copySecondary && copyPrimary !== copySecondary,
+    );
 
-    const buttons = Array.from(
-      document.querySelectorAll("button"),
-    ) as HTMLButtonElement[];
-    const stopVisible = buttons.some((button) => {
+    const buttons = Array.from(document.querySelectorAll("button")) as HTMLButtonElement[];
+    const generating = buttons.some((button) => {
       if (!isVisible(button)) return false;
-      const label = (button.getAttribute("aria-label") || "").toLowerCase();
       const text = (button.innerText || "").toLowerCase();
-      return (
-        label.includes("stop") ||
-        text.includes("stop") ||
-        label.includes("update") ||
-        text.includes("update")
-      );
+      return text.includes("stop") || text.includes("update");
     });
 
-    const nodes = Array.from(
-      document.querySelectorAll(selectors.assistantMessage),
-    ) as HTMLElement[];
+    const nodes = Array.from(document.querySelectorAll(selectors.assistantMessage)) as HTMLElement[];
     const last = nodes[nodes.length - 1];
     return {
-      actionVisible,
-      stopVisible,
+      copyVisible,
+      copyMismatch,
+      copyPrimaryFound: Boolean(copyPrimary),
+      copySecondaryFound: Boolean(copySecondary),
+      generating,
       lastAssistantText: last?.innerText ?? "",
       lastAssistantIndex: nodes.length ? nodes.length - 1 : -1,
       innerWidth: window.innerWidth,
@@ -816,4 +660,143 @@ async function getCompletionSnapshot(page: Page): Promise<{
       );
     }
   }, SELECTORS);
+
+  maybeLogMismatch("copyButton", snapshot, logger);
+
+  return {
+    copyVisible: snapshot.copyVisible,
+    generating: snapshot.generating,
+    lastAssistantText: snapshot.lastAssistantText,
+    lastAssistantIndex: snapshot.lastAssistantIndex,
+    innerWidth: snapshot.innerWidth,
+  };
+}
+
+async function waitForSelectorPair(
+  page: Page,
+  pair: SelectorPair,
+  logger: ((message: string) => void) | undefined,
+  options: { timeoutMs?: number; state?: "attached" | "visible" } = {},
+): Promise<string> {
+  const combined = pair.secondary ? `${pair.primary}, ${pair.secondary}` : pair.primary;
+  await page.waitForSelector(combined, {
+    timeout: options.timeoutMs,
+    state: options.state ?? "attached",
+  });
+  const resolved = await resolveSelectorPair(page, pair, logger);
+  if (!resolved) {
+    throw new Error(`Selector not found for ${pair.name}`);
+  }
+  return resolved;
+}
+
+async function selectorExists(
+  page: Page,
+  pair: SelectorPair,
+  logger?: (message: string) => void,
+  options: { requireText?: string } = {},
+): Promise<boolean> {
+  const resolved = (await page.evaluate(
+    ({
+      primary,
+      secondary,
+      text,
+    }: {
+      primary: string;
+      secondary: string | null;
+      text: string;
+    }) => {
+      const primaryEl = document.querySelector(primary);
+      const secondaryEl = secondary ? document.querySelector(secondary) : null;
+      const secondaryMatch = secondaryEl
+        ? text
+          ? (secondaryEl.textContent || "").toLowerCase().includes(text)
+          : true
+        : false;
+      const mismatch =
+        primaryEl && secondaryEl && primaryEl !== secondaryEl && secondaryMatch;
+      return {
+        found: Boolean(primaryEl || (secondaryEl && secondaryMatch)),
+        mismatch,
+        primaryFound: Boolean(primaryEl),
+        secondaryFound: Boolean(secondaryEl && secondaryMatch),
+      };
+    },
+    {
+      primary: pair.primary,
+      secondary: pair.secondary ?? null,
+      text: options.requireText ? options.requireText.toLowerCase() : "",
+    },
+  )) as {
+    found: boolean;
+    mismatch: boolean;
+    primaryFound: boolean;
+    secondaryFound: boolean;
+  };
+
+  if (resolved.mismatch) {
+    logSelectorMismatch(pair.name, logger);
+  }
+
+  return resolved.found;
+}
+
+async function resolveSelectorPair(
+  page: Page,
+  pair: SelectorPair,
+  logger?: (message: string) => void,
+): Promise<string | null> {
+  const resolved = (await page.evaluate(
+    ({
+      primary,
+      secondary,
+    }: {
+      primary: string;
+      secondary: string | null;
+    }) => {
+      const primaryEl = document.querySelector(primary);
+      const secondaryEl = secondary ? document.querySelector(secondary) : null;
+      const mismatch = primaryEl && secondaryEl && primaryEl !== secondaryEl;
+      return {
+        selector: primaryEl ? primary : secondaryEl ? secondary : null,
+        mismatch,
+      };
+    },
+    {
+      primary: pair.primary,
+      secondary: pair.secondary ?? null,
+    },
+  )) as { selector: string | null; mismatch: boolean };
+
+  if (resolved.mismatch) {
+    logSelectorMismatch(pair.name, logger);
+  }
+
+  return resolved.selector;
+}
+
+function maybeLogMismatch(
+  key: string,
+  snapshot: {
+    copyMismatch?: boolean;
+    copyPrimaryFound?: boolean;
+    copySecondaryFound?: boolean;
+  },
+  logger?: (message: string) => void,
+): void {
+  if (!snapshot.copyMismatch) return;
+  if (snapshot.copyPrimaryFound && snapshot.copySecondaryFound) {
+    logSelectorMismatch(key, logger);
+  }
+}
+
+function logSelectorMismatch(
+  key: string,
+  logger?: (message: string) => void,
+): void {
+  if (loggedSelectorMismatches.has(key)) return;
+  loggedSelectorMismatches.add(key);
+  logger?.(
+    `[selectors] mismatch for ${key}; data-testid and aria selectors resolve to different elements. Please report this to the developer.`,
+  );
 }

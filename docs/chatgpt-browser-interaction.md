@@ -171,7 +171,7 @@ Elements have primary and secondary selectors for robustness. Use both; error if
 |---------|----------------------|----------------------|
 | Model dropdown trigger | `[data-testid='model-switcher-dropdown-button']` | `button[aria-label*="Model selector"]` |
 | Model option (5.2 Pro) | `[data-testid='model-switcher-gpt-5-2-pro']` | — |
-| Prompt textarea | `#prompt-textarea` | `[placeholder="Ask anything"]` |
+| Prompt textarea | `#prompt-textarea` | `.ProseMirror`, `[contenteditable="true"]` |
 | Thinking mode trigger | (in `[data-testid='composer-footer-actions']`) | `button[aria-label*="Extended thinking"]` or `button[aria-label*="Pro"]` |
 | Thinking dropdown options | `[role="menuitemradio"]` | containing text "Standard" or "Extended" |
 | Attachments button | `[data-testid='composer-plus-btn']` | `button[aria-label*="Add files"]` |
@@ -189,8 +189,8 @@ Elements have primary and secondary selectors for robustness. Use both; error if
 | Thinking sidebar close | `[data-testid='close-button']` | — |
 | File container | `#thread-bottom-container` | — |
 | User message | `[data-message-author-role="user"]` | — |
-| Stop button (generating) | — | button containing "Stop" or `button[aria-label*="Stop"]` |
-| Update button (generating) | — | button containing "Update" |
+| Stop button (generating) | — | button containing text "Stop" |
+| Update button (generating) | — | button containing text "Update" |
 
 ### Reference Selectors (not currently used)
 

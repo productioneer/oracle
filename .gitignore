@@ -6,3 +6,4 @@ scripts/evals/results/
 
 # local runs/logs
 .oracle/
+.work/

@@ -1,5 +1,5 @@
 import http from "http";
-import type { Browser, Page } from "puppeteer";
+import type { Browser, Page } from "playwright";
 import { withTimeout } from "../utils/timeout.js";
 
 export type HealthStatus = {
@@ -24,9 +24,11 @@ export async function checkBrowserRuntime(
   timeoutMs = 1500,
 ): Promise<HealthStatus> {
   try {
-    const target = browser.targets()[0];
-    if (!target) return { ok: false, reason: "no targets" };
-    const client = await target.createCDPSession();
+    const hasCDP = typeof (browser as any).newBrowserCDPSession === "function";
+    if (!hasCDP) {
+      return { ok: true };
+    }
+    const client = await (browser as any).newBrowserCDPSession();
     await withTimeout(
       client.send("Runtime.evaluate", { expression: "1+1" }),
       timeoutMs,

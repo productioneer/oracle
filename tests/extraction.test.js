@@ -1,15 +1,12 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const puppeteer = require('puppeteer');
+const { chromium } = require('playwright');
 const { getLastAssistantMessage } = require('../dist/browser/chatgpt.js');
 
 let browser;
 
 before(async () => {
-  browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
+  browser = await chromium.launch({ headless: true });
 });
 
 after(async () => {

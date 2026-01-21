@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
-import puppeteer from "puppeteer";
-import type { Browser } from "puppeteer";
+import { firefox } from "playwright";
+import type { Browser, BrowserServer } from "playwright";
 import type { Logger } from "../utils/log.js";
 import { oracleFirefoxDataDir } from "./profiles.js";
 import { FIREFOX_SETUP_WINDOW } from "./focus.js";
@@ -26,6 +26,7 @@ export type FirefoxLaunchOptions = {
 
 export type FirefoxConnection = {
   browser: Browser;
+  server?: BrowserServer;
   reused: boolean;
   keepAlive: boolean;
   pid?: number;
@@ -78,9 +79,8 @@ export async function launchFirefox(
       } else {
         try {
           options.logger?.("[firefox] reuse existing browser");
-          const browser = await puppeteer.connect({
-            browserWSEndpoint: existing.wsEndpoint,
-            protocol: "webDriverBiDi",
+          const browser = await firefox.connect({
+            wsEndpoint: existing.wsEndpoint,
           });
           try {
             const pid = await requireFirefoxPid(
@@ -91,7 +91,7 @@ export async function launchFirefox(
             );
             return { browser, reused: true, keepAlive: true, pid };
           } catch (error) {
-            await browser.disconnect().catch(() => null);
+            await browser.close().catch(() => null);
             throw error;
           }
         } catch (error) {
@@ -130,28 +130,29 @@ export async function launchFirefox(
       ignoreDefaultArgs.push("--foreground");
     }
   }
-  options.logger?.(`[firefox] launch (bidi) args: ${args.join(" ")}`);
-  const browser = await puppeteer.launch({
-    browser: "firefox",
+  options.logger?.(`[firefox] launch (server) args: ${args.join(" ")}`);
+  const server = await firefox.launchServer({
     headless: false,
     executablePath: options.executablePath,
     args,
     ignoreDefaultArgs: ignoreDefaultArgs.length ? ignoreDefaultArgs : undefined,
   });
+  const browser = await firefox.connect({ wsEndpoint: server.wsEndpoint() });
   let pid: number;
   try {
     pid = await requireFirefoxPid(
-      browser.process()?.pid,
+      server.process()?.pid,
       resolvedProfile,
       options.logger,
       profileGuard,
     );
   } catch (error) {
     await browser.close().catch(() => null);
+    await server.close().catch(() => null);
     throw error;
   }
   if (reuse) {
-    const wsEndpoint = browser.wsEndpoint();
+    const wsEndpoint = server.wsEndpoint();
     await writeJsonAtomic(connectionPath, {
       wsEndpoint,
       createdAt: nowIso(),
@@ -161,7 +162,7 @@ export async function launchFirefox(
     });
     options.logger?.(`[firefox] wrote connection ${connectionPath}`);
   }
-  return { browser, reused: false, keepAlive: reuse, pid };
+  return { browser, server, reused: false, keepAlive: reuse, pid };
 }
 
 export async function cleanupAutomationProfile(

@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
-const puppeteer = require('puppeteer');
+const { chromium } = require('playwright');
 const { submitPrompt } = require('../dist/browser/chatgpt.js');
 
 function startServer(html) {
@@ -28,7 +28,7 @@ test('submitPrompt types multiline content with text and newlines', async () => 
   </html>`;
 
   const { server, port } = await startServer(html);
-  const browser = await puppeteer.launch({ headless: 'new' });
+  const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
 
   try {

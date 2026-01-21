@@ -13,9 +13,10 @@ import { sleep } from "../utils/time.js";
 export async function readThinkingContent(config: RunConfig): Promise<string> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    let browser: import("puppeteer").Browser | null = null;
-    let page: import("puppeteer").Page | null = null;
+    let browser: import("playwright").Browser | null = null;
+    let page: import("playwright").Page | null = null;
     let shouldClose = false;
+    let firefoxServer: import("playwright").BrowserServer | undefined;
     try {
       if (config.browser === "chrome") {
         const active = config.debugPort
@@ -42,7 +43,9 @@ export async function readThinkingContent(config: RunConfig): Promise<string> {
         });
         browser = connection.browser;
         shouldClose = !connection.keepAlive;
-        page = await browser.newPage();
+        firefoxServer = connection.server;
+        const context = browser.contexts()[0] ?? (await browser.newContext());
+        page = await context.newPage();
       }
 
       if (!page) throw new Error("Failed to open browser page");
@@ -52,9 +55,7 @@ export async function readThinkingContent(config: RunConfig): Promise<string> {
       await navigateToChat(page, targetUrl);
       await ensureWideViewport(page);
       const ready = await ensureChatGptReady(page);
-      if (ready.needsCloudflare)
-        throw new Error("Cloudflare challenge detected");
-      if (!ready.loggedIn) throw new Error("Login required");
+      if (!ready.ok) throw new Error(ready.message ?? "ChatGPT not ready");
       await waitForConversationContent(page, 15_000);
       return await getThinkingContent(page);
     } catch (error) {
@@ -70,8 +71,11 @@ export async function readThinkingContent(config: RunConfig): Promise<string> {
         try {
           if (shouldClose) {
             await browser.close();
+            if (firefoxServer) {
+              await firefoxServer.close().catch(() => null);
+            }
           } else {
-            await browser.disconnect();
+            await disconnectBrowser(browser);
           }
         } catch {
           // ignore
@@ -85,14 +89,14 @@ export async function readThinkingContent(config: RunConfig): Promise<string> {
 }
 
 async function waitForConversationContent(
-  page: import("puppeteer").Page,
+  page: import("playwright").Page,
   timeoutMs: number,
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const hasAssistant = await page.evaluate(() => {
       return (
-        document.querySelectorAll('[data-message-author-role=\"assistant\"]')
+        document.querySelectorAll('[data-message-author-role="assistant"]')
           .length > 0
       );
     });
@@ -109,19 +113,9 @@ async function waitForConversationContent(
         return /^thought for /i.test(text) && text.length < 50;
       });
       if (thoughtEl) return true;
-      const sidebars = Array.from(
-        document.querySelectorAll(".bg-token-sidebar-surface-primary"),
-      ) as HTMLElement[];
-      return sidebars.some((s) => {
-        if ((s.innerText?.length || 0) < 100) return false;
-        const hasYourChats = Array.from(s.querySelectorAll("*")).some(
-          (el) => (el.textContent || "").trim().toLowerCase() === "your chats",
-        );
-        if (hasYourChats) return false;
-        return Array.from(s.querySelectorAll("*")).some((el) => {
-          const text = (el.textContent || "").trim().toLowerCase();
-          return text === "pro thinking" || text === "activity";
-        });
+      return elements.some((el) => {
+        const text = (el.textContent || "").trim();
+        return text === "Pro thinking" || /^pro thinking/i.test(text);
       });
     });
     if (hasThinkingUI) return;
@@ -147,4 +141,15 @@ async function isChromeDebugPortActive(port: number): Promise<boolean> {
 function isRetryableThinkingError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /detached frame|execution context was destroyed/i.test(message);
+}
+
+async function disconnectBrowser(
+  browser: import("playwright").Browser,
+): Promise<void> {
+  const maybeDisconnect = (browser as any).disconnect;
+  if (typeof maybeDisconnect === "function") {
+    await maybeDisconnect.call(browser);
+  } else {
+    await browser.close();
+  }
 }

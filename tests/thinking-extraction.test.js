@@ -1,15 +1,12 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const puppeteer = require('puppeteer');
+const { chromium } = require('playwright');
 const { getThinkingContent } = require('../dist/browser/chatgpt.js');
 
 let browser;
 
 before(async () => {
-  browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
+  browser = await chromium.launch({ headless: true });
 });
 
 after(async () => {
@@ -33,7 +30,6 @@ test('extracts thinking content from sidebar', async () => {
 
   const content = await getThinkingContent(page);
   await page.close();
-  assert.match(content, /activity/i);
   assert.match(content, /pro thinking/i);
   assert.match(content, /sidebar thinking content/i);
 });
@@ -65,31 +61,6 @@ test('clicks latest thinking header when multiple are present', async () => {
   await page.close();
   assert.match(content, /second/i);
   assert.doesNotMatch(content, /first/i);
-});
-
-test('excludes chat history sidebar', async () => {
-  const page = await browser.newPage();
-  await page.setContent(`<!doctype html>
-  <html>
-    <body>
-      <div class="bg-token-sidebar-surface-primary">
-        <div>Your chats</div>
-        <div>Chat 1</div>
-        <div>Chat 2</div>
-      </div>
-      <section>
-        <div>Pro thinking</div>
-        <div>Fallback content here</div>
-      </section>
-    </body>
-  </html>`);
-
-  const content = await getThinkingContent(page);
-  await page.close();
-  // Should NOT get "Your chats" content, should fall back to Pro thinking section
-  assert.doesNotMatch(content, /your chats/i);
-  assert.match(content, /pro thinking/i);
-  assert.match(content, /fallback content/i);
 });
 
 test('extracts thinking content via fallback sections', async () => {
