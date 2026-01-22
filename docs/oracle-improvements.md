@@ -38,12 +38,14 @@ Derived from `.work/research1.md` (Chrome window/focus review). Required for cor
 - Exactly **one** Chrome process for the oracle user-data-dir.
 - Exactly **one** Chrome **window** exists after first launch; it must **never be windowless**.
 - The window is **offscreen + minimized** by default, and **never steals focus** unless explicitly revealed for login.
+- The window/viewport width is **>= 1024px** (prefer 1280+) so the thinking sidebar renders as a sidebar, not a modal.
 - Use **CDP window bounds** to enforce hidden state; no UI-scripting or “restore focus” hacks.
 
 **Launch requirements:**
 - Do **not** use `--no-startup-window` (creates a first-window race and flicker).
 - Do **not** rely on `--start-minimized` (not reliable).
-- Create the startup window offscreen via `--window-position=-32000,-32000` (small size ok).
+- Include `--disable-session-crashed-bubble` to suppress "restore pages" prompts after unclean exits.
+- Create the startup window offscreen via `--window-position=-32000,-32000` with width >= 1024px.
 
 **Lifecycle requirements:**
 - Keep a **persistent tab** (sentinel or ChatGPT tab) to keep the window alive.
@@ -51,6 +53,13 @@ Derived from `.work/research1.md` (Chrome window/focus review). Required for cor
 
 **Instrumentation:**
 - Log window bounds and windowId at key phases (launch, attach, pre/post submit) to catch regressions.
+
+---
+
+## Run Retention
+
+- CLI prunes run directories older than **48h**.
+- Skip active runs (`starting`, `running`, `needs_user`).
 
 ---
 
@@ -135,6 +144,9 @@ function getLastAssistantResponse() {
 | Stop button visible but stuck | Refresh page only, do NOT resubmit |
 | Clearly failed/cancelled | Can resubmit once |
 | Max retries | 1 (not 3) |
+
+Additional recovery constraints:
+- If restarting Chrome, attempt CDP `Browser.close` and wait for clean exit before any SIGTERM/SIGKILL; avoid "restore pages" prompts.
 
 ---
 

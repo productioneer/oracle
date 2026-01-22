@@ -8,6 +8,8 @@ Canonical reference for automating ChatGPT web UI. This is the up-to-date spec f
 
 **General rule**: Always wait for an element to exist before interacting with it.
 
+**Viewport requirement**: Ensure `window.innerWidth >= 1024` before waiting for the thinking sidebar. If smaller, resize viewport/window to at least 1280×800 and log the adjustment. This keeps the thinking sidebar as a sidebar (not a modal).
+
 **Selector philosophy**: Use both `data-testid` attributes AND ARIA labels/text where available. If both methods find elements but they disagree (different elements), log an error prompting the user to report this to the developer — it likely indicates a UI change that needs investigation.
 
 **Selector change policy**: The selectors in this document are authoritative. Any changes, additions, or alternatives MUST be approved by the project owner before implementation. Do not add fallback selectors or alternative approaches without explicit approval. This policy exists because ad-hoc selector additions have historically caused unreliable, hard-to-debug code.
