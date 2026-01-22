@@ -19,6 +19,7 @@ import {
   readThinkingState,
   saveThinkingState,
 } from "./run/thinking.js";
+import { cleanupRunsRoot } from "./run/cleanup.js";
 import type { RunConfig, StatusPayload, ResultPayload } from "./run/types.js";
 import {
   ensureDir,
@@ -46,6 +47,7 @@ const CONVERSATION_URL_WAIT_MS = 5_000;
 const CONVERSATION_URL_POLL_MS = 250;
 const PROMPT_SUBMIT_WAIT_MS = 60_000;
 const PROMPT_SUBMIT_POLL_MS = 500;
+const RUNS_TTL_MS = 48 * 60 * 60 * 1000;
 
 const argv = [...process.argv];
 const helpDevIndex = argv.indexOf("--help-dev");
@@ -128,6 +130,7 @@ if (DEV_MODE) {
 }
 
 runCommand.action(async (args, options) => {
+  await cleanupRuns(options.runsRoot);
   const {
     runId,
     prompt: rawPrompt,
@@ -286,6 +289,7 @@ program
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .option("--json", "Output JSON", false)
   .action(async (runId, options) => {
+    await cleanupRuns(options.runsRoot);
     const { runDirPath, status: initialStatus } = await loadStatusForRun(
       runId,
       options.runsRoot,
@@ -312,6 +316,7 @@ program
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .option("--json", "Output JSON metadata", false)
   .action(async (runId, options) => {
+    await cleanupRuns(options.runsRoot);
     const runDirPath = await requireRunDir(runId, options.runsRoot);
     const jsonPath = resultJsonPath(runDirPath);
     const mdPath = resultPath(runDirPath);
@@ -382,6 +387,7 @@ program
     false,
   )
   .action(async (runId, options) => {
+    await cleanupRuns(options.runsRoot);
     const { runDirPath, config } = await loadRunConfigForRun(
       runId,
       options.runsRoot,
@@ -423,6 +429,7 @@ program
   .option("--allow-visible", "Allow visible window for login", false)
   .option("--allow-kill", "Allow killing automation Chrome if stuck", false)
   .action(async (runId, options) => {
+    await cleanupRuns(options.runsRoot);
     const runDirPath = await requireRunDir(runId, options.runsRoot);
     const initialStatus = await readStatusMaybe(runDirPath);
     const status = initialStatus
@@ -450,6 +457,7 @@ program
   .argument("<run_id>", "run id")
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .action(async (runId, options) => {
+    await cleanupRuns(options.runsRoot);
     const runDirPath = await requireRunDir(runId, options.runsRoot);
     const initialStatus = await readStatusMaybe(runDirPath);
     const status = initialStatus
@@ -475,6 +483,7 @@ program
   .argument("<run_id>", "run id")
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .action(async (runId, options) => {
+    await cleanupRuns(options.runsRoot);
     const runDirPath = await requireRunDir(runId, options.runsRoot);
     const statusFile = statusPath(runDirPath);
     if (!(await pathExists(statusFile))) {
@@ -521,6 +530,7 @@ program
   .argument("[run_id]", "run id (optional)")
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .action(async (runId, options) => {
+    await cleanupRuns(options.runsRoot);
     if (runId) {
       const { runDirPath, config } = await loadRunConfigForRun(
         runId,
@@ -615,6 +625,14 @@ async function resolveRunInvocation(
 
 function isRunId(value: string): boolean {
   return /^[a-z0-9]+-[a-z0-9]+$/.test(value);
+}
+
+async function cleanupRuns(runsRoot: string): Promise<void> {
+  try {
+    await cleanupRunsRoot(runsRoot, { ttlMs: RUNS_TTL_MS });
+  } catch {
+    // best-effort cleanup only
+  }
 }
 
 async function loadPromptFromOptions(
@@ -803,9 +821,18 @@ async function waitForPromptSubmitted(
   runId: string,
   runDirPath: string,
 ): Promise<void> {
+  let configTimeoutMs = PROMPT_SUBMIT_WAIT_MS;
+  try {
+    const config = await readJson<RunConfig>(runConfigPath(runDirPath));
+    if (Number.isFinite(config.timeoutMs) && config.timeoutMs > 0) {
+      configTimeoutMs = Math.max(configTimeoutMs, config.timeoutMs);
+    }
+  } catch {
+    // fall back to default
+  }
   const start = Date.now();
   let status = await readStatusMaybe(runDirPath);
-  while (Date.now() - start < PROMPT_SUBMIT_WAIT_MS) {
+  while (Date.now() - start < configTimeoutMs) {
     if (status?.state === "needs_user") {
       status = await waitForNeedsUserResolution(runId, runDirPath, status);
     }
@@ -830,7 +857,7 @@ async function waitForPromptSubmitted(
   const state = status?.state ?? "unknown";
   const stage = status?.stage ?? "unknown";
   throw new Error(
-    `run ${runId} did not submit prompt within ${Math.round(PROMPT_SUBMIT_WAIT_MS / 1000)}s (state=${state}, stage=${stage})`,
+    `run ${runId} did not submit prompt within ${Math.round(configTimeoutMs / 1000)}s (state=${state}, stage=${stage})`,
   );
 }
 

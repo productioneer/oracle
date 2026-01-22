@@ -63,8 +63,6 @@ export async function launchChrome(
   }
   if (options.allowVisible) {
     args.push("--window-position=0,0");
-  } else {
-    args.push("--no-startup-window", "--start-minimized");
   }
 
   const openArgs = ["-n", "-g", "-a", appName, "--args", ...args];
@@ -104,53 +102,25 @@ export async function createHiddenPage(
   options: { allowVisible?: boolean; logger?: Logger } = {},
 ): Promise<Page> {
   const context = browser.contexts()[0] ?? (await browser.newContext());
-  const url = `data:text/html,oracle-${token}`;
-  let page: Page | null = null;
-  let cdp: import("playwright").CDPSession | null = null;
-
-  try {
-    cdp = await browser.newBrowserCDPSession();
-    const waitForPage = context
-      .waitForEvent("page", { timeout: 10_000 })
-      .catch(() => null);
-    try {
-      await cdp.send("Target.createTarget", {
-        url,
-        background: true,
-        hidden: true,
-      } as any);
-    } catch (error) {
-      options.logger?.(
-        `[chrome] hidden target unsupported: ${String(error)}; retrying without hidden flag`,
-      );
-      await cdp.send("Target.createTarget", {
-        url,
-        background: true,
-      } as any);
-    }
-    page = await waitForPage;
-    if (!page) {
-      page = context.pages().find((candidate) => candidate.url() === url) ?? null;
-    }
-  } catch (error) {
-    options.logger?.(`[chrome] hidden target create failed: ${String(error)}`);
-  } finally {
-    if (cdp) {
-      await cdp.detach().catch(() => null);
-    }
+  let page: Page | null =
+    context.pages().find((candidate) => candidate.url().startsWith("https://")) ??
+    context.pages()[0] ??
+    null;
+  if (page && page.isClosed()) {
+    page = null;
   }
-
   if (!page) {
     page = await context.newPage();
+    const url = `data:text/html,oracle-${token}`;
     try {
       await page.goto(url, { waitUntil: "domcontentloaded" });
     } catch {
       // ignore data url failures
     }
   }
-
   if (!options.allowVisible) {
-    await hideChromeWindowForPage(page, options.logger);
+    const preferredWindowId = await getWindowIdForPage(page, options.logger);
+    await ensureChromeWindowHidden(browser, options.logger, preferredWindowId);
   }
   return page;
 }
@@ -208,6 +178,126 @@ async function hideChromeWindowForPage(
   }
   if (lastError) {
     logger?.(`[chrome] hide window failed: ${String(lastError)}`);
+  }
+}
+
+async function ensureChromeWindowHidden(
+  browser: Browser,
+  logger?: Logger,
+  preferredWindowId?: number,
+): Promise<void> {
+  let cdp: import("playwright").CDPSession | null = null;
+  try {
+    cdp = await browser.newBrowserCDPSession();
+    const targets = await cdp.send("Target.getTargets");
+    const pageTargets = (targets?.targetInfos ?? []).filter(
+      (target: { type?: string }) => target.type === "page",
+    );
+    if (pageTargets.length === 0) {
+      logger?.("[chrome] no page targets available to derive window");
+      return;
+    }
+    const windowToTargets = new Map<number, string[]>();
+    for (const target of pageTargets) {
+      const windowInfo = await cdp.send("Browser.getWindowForTarget", {
+        targetId: target.targetId,
+      });
+      if (!windowInfo?.windowId) continue;
+      const list = windowToTargets.get(windowInfo.windowId) ?? [];
+      list.push(target.targetId);
+      windowToTargets.set(windowInfo.windowId, list);
+    }
+    const windowIds = Array.from(windowToTargets.keys());
+    if (windowIds.length === 0) {
+      logger?.("[chrome] no windowIds resolved from targets");
+      return;
+    }
+    const primaryWindowId =
+      preferredWindowId && windowToTargets.has(preferredWindowId)
+        ? preferredWindowId
+        : windowIds[0];
+    if (windowIds.length > 1) {
+      logger?.(
+        `[chrome] multiple windows detected (${windowIds.join(",")}); closing extras (keeping ${primaryWindowId})`,
+      );
+      for (const [windowId, targetsForWindow] of windowToTargets.entries()) {
+        if (windowId === primaryWindowId) continue;
+        for (const targetId of targetsForWindow) {
+          await cdp.send("Target.closeTarget", { targetId }).catch(() => null);
+        }
+      }
+    }
+    await hideChromeWindowById(cdp, primaryWindowId, logger);
+  } catch (error) {
+    logger?.(`[chrome] ensure hidden window failed: ${String(error)}`);
+  } finally {
+    if (cdp) {
+      await cdp.detach().catch(() => null);
+    }
+  }
+}
+
+async function getWindowIdForPage(
+  page: Page,
+  logger?: Logger,
+): Promise<number | undefined> {
+  try {
+    const client = await page.context().newCDPSession(page);
+    const info = await client.send("Target.getTargetInfo");
+    const targetId = info?.targetInfo?.targetId;
+    if (!targetId) {
+      await client.detach().catch(() => null);
+      return undefined;
+    }
+    const windowInfo = await client.send("Browser.getWindowForTarget", {
+      targetId,
+    });
+    await client.detach().catch(() => null);
+    if (windowInfo?.windowId) {
+      return windowInfo.windowId as number;
+    }
+  } catch (error) {
+    logger?.(`[chrome] windowId lookup failed: ${String(error)}`);
+  }
+  return undefined;
+}
+
+async function hideChromeWindowById(
+  cdp: import("playwright").CDPSession,
+  windowId: number,
+  logger?: Logger,
+): Promise<void> {
+  const bounds = await cdp
+    .send("Browser.getWindowBounds", { windowId })
+    .catch(() => null);
+  if (bounds?.bounds) {
+    logger?.(
+      `[chrome] window ${windowId} bounds state=${bounds.bounds.windowState ?? "unknown"} left=${bounds.bounds.left ?? "?"} top=${bounds.bounds.top ?? "?"} width=${bounds.bounds.width ?? "?"} height=${bounds.bounds.height ?? "?"}`,
+    );
+  }
+  const isMinimized = bounds?.bounds?.windowState === "minimized";
+  const left = bounds?.bounds?.left ?? 0;
+  const top = bounds?.bounds?.top ?? 0;
+  const offscreen = left <= -2000 && top <= -2000;
+  if (!offscreen) {
+    await cdp.send("Browser.setWindowBounds", {
+      windowId,
+      bounds: { left: -32000, top: -32000, width: 800, height: 600 },
+    });
+  }
+  if (!isMinimized) {
+    await cdp.send("Browser.setWindowBounds", {
+      windowId,
+      bounds: { windowState: "minimized" },
+    });
+  }
+  const after = await cdp
+    .send("Browser.getWindowBounds", { windowId })
+    .catch(() => null);
+  if (after?.bounds) {
+    logger?.(
+      `[chrome] window ${windowId} hidden state=${after.bounds.windowState ?? "unknown"} left=${after.bounds.left ?? "?"} top=${after.bounds.top ?? "?"} width=${after.bounds.width ?? "?"} height=${after.bounds.height ?? "?"}`,
+    );
   }
 }
 

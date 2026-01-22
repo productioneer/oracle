@@ -29,7 +29,7 @@ export async function readThinkingContent(config: RunConfig): Promise<string> {
           allowVisible: false,
         });
         browser = connection.browser;
-        shouldClose = !connection.reused;
+        shouldClose = false;
         page = await createHiddenPage(browser, config.runId, {
           allowVisible: false,
         });
@@ -70,7 +70,7 @@ export async function readThinkingContent(config: RunConfig): Promise<string> {
         throw error;
       }
     } finally {
-      if (page) {
+      if (page && config.browser !== "chrome") {
         await page.close().catch(() => null);
       }
       if (browser) {

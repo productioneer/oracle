@@ -110,6 +110,8 @@ After typing, verify the prompt was entered correctly:
 
 For multiple files, repeat steps 1-6.
 
+**Native file chooser requirement:** The OS file chooser dialog must **not** remain open after file selection. If it does, treat as a failure and retry using a different upload strategy (e.g., `page.waitForEvent('filechooser')` + `fileChooser.setFiles(...)`, or direct `input.setInputFiles(...)` without opening the native dialog). Log which strategy was used and confirm the prompt input can receive keystrokes after upload.
+
 ---
 
 ## Phase 3: Send & Wait for Response

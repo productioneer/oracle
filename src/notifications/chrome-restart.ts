@@ -14,6 +14,11 @@ type DoneFile = {
   approvedAt?: number;
 };
 
+type NotifyLockFile = {
+  pid: number;
+  createdAt: number;
+};
+
 export type RestartApprovalResult =
   | { action: 'restart'; approvedAt: number }
   | { action: 'done'; doneAt: number }
@@ -25,6 +30,7 @@ const RESTART_LOCK = 'chrome-restart.lock';
 const NOTIFY_LOCK = 'chrome-restart.notify';
 
 const DEFAULT_POLL_MS = 2000;
+const DEFAULT_NOTIFY_COOLDOWN_MS = 60_000;
 
 export function approvalsDir(): string {
   const override = process.env.ORACLE_APPROVALS_DIR;
@@ -81,8 +87,12 @@ export async function tryAcquireRestartLock(dir = approvalsDir()): Promise<boole
   return tryAcquireLock(path.join(dir, RESTART_LOCK));
 }
 
-export async function tryAcquireNotifyLock(dir = approvalsDir()): Promise<boolean> {
-  return tryAcquireLock(path.join(dir, NOTIFY_LOCK));
+export async function tryAcquireNotifyLock(
+  dir = approvalsDir(),
+  cooldownMs = resolveNotifyCooldownMs(),
+  logger?: (msg: string) => void,
+): Promise<boolean> {
+  return tryAcquireNotifyLockWithCooldown(dir, cooldownMs, logger);
 }
 
 export async function waitForChromeRestartApproval(options: {
@@ -106,6 +116,7 @@ export async function waitForChromeRestartApproval(options: {
   const notify = options.notify ?? notifyWithNotifiCli;
   let notified = false;
   let forceDone = false;
+  const notifyCooldownMs = resolveNotifyCooldownMs();
 
   let statusNotifiedAt = 0;
   const statusThrottleMs = 60_000;
@@ -137,7 +148,7 @@ export async function waitForChromeRestartApproval(options: {
       }
       // Someone else is restarting; wait for done.
     } else if (!notified) {
-      const acquiredNotify = await tryAcquireNotifyLock(dir);
+      const acquiredNotify = await tryAcquireNotifyLock(dir, notifyCooldownMs, logger);
       if (acquiredNotify) {
         const approved = await notify(title, message);
         if (approved) {
@@ -254,6 +265,51 @@ async function tryAcquireLock(lockPath: string): Promise<boolean> {
     if (error?.code === 'EEXIST') return false;
     throw error;
   }
+}
+
+async function tryAcquireNotifyLockWithCooldown(
+  dir: string,
+  cooldownMs: number,
+  logger?: (msg: string) => void,
+): Promise<boolean> {
+  const lockPath = path.join(dir, NOTIFY_LOCK);
+  const existing = await readNotifyLock(lockPath);
+  if (existing) {
+    const age = Date.now() - existing.createdAt;
+    if (age < cooldownMs) {
+      logger?.(
+        `[restart] notify suppressed; last notified ${Math.round(age / 1000)}s ago`,
+      );
+      return false;
+    }
+    await removeFile(lockPath);
+  }
+  const acquired = await tryAcquireLock(lockPath);
+  if (!acquired) return false;
+  await writeNotifyLock(lockPath);
+  return true;
+}
+
+async function readNotifyLock(filePath: string): Promise<NotifyLockFile | null> {
+  if (!(await pathExists(filePath))) return null;
+  try {
+    return await readJson<NotifyLockFile>(filePath);
+  } catch {
+    return null;
+  }
+}
+
+async function writeNotifyLock(filePath: string): Promise<void> {
+  await writeJsonAtomic(filePath, { pid: process.pid, createdAt: Date.now() });
+}
+
+function resolveNotifyCooldownMs(): number {
+  const raw = process.env.ORACLE_NOTIFY_COOLDOWN_MS;
+  if (raw && raw.trim()) {
+    const value = Number(raw);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return DEFAULT_NOTIFY_COOLDOWN_MS;
 }
 
 async function removeFile(filePath: string): Promise<void> {

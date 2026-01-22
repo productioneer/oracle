@@ -15,6 +15,8 @@ const SELECTORS = {
   uploadMenuText: 'Add photos &',
 };
 
+type UploadStrategy = "menu-input" | "direct" | "filechooser";
+
 type SelectorPair = {
   name: string;
   primary: string;
@@ -73,23 +75,19 @@ async function uploadSingleAttachment(
   const removeCount = await page.locator(SELECTORS.removeFileButton).count();
   logDebug(logger, `starting upload for ${attachment.displayName}`);
 
-  await openAttachmentMenu(page, logger);
-  await page.getByText(SELECTORS.uploadMenuText).click();
-
-  const inputSelector = await waitForSelectorPair(
-    page,
-    SELECTOR_PAIRS.fileInput,
-    logger,
-    {
-      timeoutMs: 10_000,
-      state: "attached",
-    },
-  );
-  await page.locator(inputSelector).setInputFiles(attachment.path);
-  logDebug(logger, `setInputFiles for ${attachment.displayName}`);
+  const strategy = resolveUploadStrategy();
+  logDebug(logger, `upload strategy=${strategy}`);
+  if (strategy === "filechooser") {
+    await uploadViaFileChooser(page, attachment, logger);
+  } else if (strategy === "direct") {
+    await uploadViaDirectInput(page, attachment, logger);
+  } else {
+    await uploadViaMenuInput(page, attachment, logger);
+  }
 
   await waitForRemoveButton(page, removeCount, attachment.displayName, logger);
   await waitForUploadComplete(page, attachment.displayName, logger);
+  await assertNoNativeDialogOpen(logger);
 }
 
 async function openAttachmentMenu(
@@ -107,6 +105,67 @@ async function openAttachmentMenu(
     },
   );
   await page.locator(selector).click();
+}
+
+async function uploadViaMenuInput(
+  page: Page,
+  attachment: Attachment,
+  logger?: (message: string) => void,
+): Promise<void> {
+  await openAttachmentMenu(page, logger);
+  const directSelector = await resolveExistingInputSelector(page, logger);
+  if (directSelector) {
+    await page.locator(directSelector).setInputFiles(attachment.path);
+    logDebug(logger, `setInputFiles (menu direct) for ${attachment.displayName}`);
+    return;
+  }
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser", { timeout: 10_000 }),
+    page.getByText(SELECTORS.uploadMenuText).click(),
+  ]);
+  await chooser.setFiles(attachment.path);
+  logDebug(logger, `filechooser setFiles (menu) for ${attachment.displayName}`);
+}
+
+async function uploadViaDirectInput(
+  page: Page,
+  attachment: Attachment,
+  logger?: (message: string) => void,
+): Promise<void> {
+  let directSelector = await resolveExistingInputSelector(page, logger);
+  if (!directSelector) {
+    logDebug(logger, "file input missing; opening attachment menu");
+    await openAttachmentMenu(page, logger);
+    directSelector = await resolveExistingInputSelector(page, logger);
+  }
+  if (!directSelector) {
+    const [chooser] = await Promise.all([
+      page.waitForEvent("filechooser", { timeout: 10_000 }),
+      page.getByText(SELECTORS.uploadMenuText).click(),
+    ]);
+    await chooser.setFiles(attachment.path);
+    logDebug(
+      logger,
+      `filechooser setFiles (direct fallback) for ${attachment.displayName}`,
+    );
+    return;
+  }
+  await page.locator(directSelector).setInputFiles(attachment.path);
+  logDebug(logger, `setInputFiles (direct) for ${attachment.displayName}`);
+}
+
+async function uploadViaFileChooser(
+  page: Page,
+  attachment: Attachment,
+  logger?: (message: string) => void,
+): Promise<void> {
+  await openAttachmentMenu(page, logger);
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser", { timeout: 10_000 }),
+    page.getByText(SELECTORS.uploadMenuText).click(),
+  ]);
+  await chooser.setFiles(attachment.path);
+  logDebug(logger, `filechooser setFiles for ${attachment.displayName}`);
 }
 
 async function waitForRemoveButton(
@@ -212,6 +271,23 @@ async function waitForSelectorPair(
   return resolved.selector;
 }
 
+async function resolveExistingInputSelector(
+  page: Page,
+  logger?: (message: string) => void,
+): Promise<string | null> {
+  const primaryCount = await page.locator(SELECTORS.fileInputPrimary).count();
+  if (primaryCount > 0) {
+    logDebug(logger, "file input present (primary)");
+    return SELECTORS.fileInputPrimary;
+  }
+  const secondaryCount = await page.locator(SELECTORS.fileInputSecondary).count();
+  if (secondaryCount > 0) {
+    logDebug(logger, "file input present (secondary)");
+    return SELECTORS.fileInputSecondary;
+  }
+  return null;
+}
+
 async function resolveSelectorPair(
   page: Page,
   pair: SelectorPair,
@@ -270,4 +346,129 @@ function logDebug(
   message: string,
 ): void {
   logger?.(`[attachments] ${message}`);
+}
+
+function resolveUploadStrategy(): UploadStrategy {
+  const raw = process.env.ORACLE_UPLOAD_STRATEGY;
+  if (!raw) return "menu-input";
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "direct") return "direct";
+  if (normalized === "menu-input") return "menu-input";
+  if (normalized === "filechooser") return "filechooser";
+  return "menu-input";
+}
+
+async function assertNoNativeDialogOpen(
+  logger?: (message: string) => void,
+): Promise<void> {
+  if (!shouldCheckNativeDialog()) return;
+  const counts = await getChromeDialogCounts(logger);
+  if (!counts) return;
+  if (counts.sheetCount > 0 || counts.dialogCount > 0) {
+    logger?.(
+      `[attachments] native dialog open (sheets=${counts.sheetCount}, dialogs=${counts.dialogCount})`,
+    );
+    await dismissNativeDialogs(logger);
+    await sleep(200);
+    const after = await getChromeDialogCounts(logger);
+    if (!after) {
+      throw new Error("Native file chooser dialog still open");
+    }
+    if (after.sheetCount > 0 || after.dialogCount > 0) {
+      throw new Error("Native file chooser dialog still open");
+    }
+    logger?.("[attachments] native dialog dismissed");
+  }
+}
+
+function shouldCheckNativeDialog(): boolean {
+  if (process.platform !== "darwin") return false;
+  const raw = process.env.ORACLE_CHECK_NATIVE_DIALOG;
+  if (!raw) return true;
+  return raw.trim() !== "0";
+}
+
+async function getChromeDialogCounts(
+  logger?: (message: string) => void,
+): Promise<{ sheetCount: number; dialogCount: number } | null> {
+  const { execFile } = await import("child_process");
+  const script = [
+    'tell application "System Events"',
+    'tell process "Google Chrome"',
+    "set sheetTotal to 0",
+    "set dialogTotal to 0",
+    "repeat with w in windows",
+    "set sheetTotal to sheetTotal + (count of sheets of w)",
+    "try",
+    "if subrole of w is \"AXDialog\" then set dialogTotal to dialogTotal + 1",
+    "end try",
+    "end repeat",
+    "return (sheetTotal as string) & \",\" & (dialogTotal as string)",
+    "end tell",
+    "end tell",
+  ].join("\n");
+  return new Promise((resolve) => {
+    execFile("osascript", ["-e", script], (err, stdout, stderr) => {
+      if (err) {
+        logger?.(`[attachments] sheet check failed: ${stderr || err.message}`);
+        return resolve(null);
+      }
+      const raw = String(stdout).trim();
+      const [sheetRaw, dialogRaw] = raw.split(",");
+      const sheetCount = Number(sheetRaw);
+      const dialogCount = Number(dialogRaw);
+      if (!Number.isFinite(sheetCount) || !Number.isFinite(dialogCount)) {
+        return resolve(null);
+      }
+      logger?.(
+        `[attachments] sheet count=${sheetCount} dialog count=${dialogCount}`,
+      );
+      resolve({ sheetCount, dialogCount });
+    });
+  });
+}
+
+async function dismissNativeDialogs(
+  logger?: (message: string) => void,
+): Promise<void> {
+  const { execFile } = await import("child_process");
+  const script = [
+    'tell application "System Events"',
+    'tell process "Google Chrome"',
+    "set closedCount to 0",
+    "repeat with w in windows",
+    "repeat with s in sheets of w",
+    "try",
+    "if exists (button \"Cancel\" of s) then",
+    "click button \"Cancel\" of s",
+    "set closedCount to closedCount + 1",
+    "end if",
+    "end try",
+    "end repeat",
+    "try",
+    "if subrole of w is \"AXDialog\" then",
+    "if exists (button \"Cancel\" of w) then",
+    "click button \"Cancel\" of w",
+    "set closedCount to closedCount + 1",
+    "end if",
+    "end if",
+    "end try",
+    "end repeat",
+    "return closedCount as string",
+    "end tell",
+    "end tell",
+  ].join("\n");
+  await new Promise<void>((resolve) => {
+    execFile("osascript", ["-e", script], (err, stdout, stderr) => {
+      if (err) {
+        logger?.(
+          `[attachments] dialog dismiss failed: ${stderr || err.message}`,
+        );
+        return resolve();
+      }
+      const raw = String(stdout).trim();
+      logger?.(`[attachments] dialog dismiss count=${raw || "0"}`);
+      resolve();
+    });
+  });
 }

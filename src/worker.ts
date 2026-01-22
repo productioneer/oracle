@@ -150,7 +150,6 @@ async function runAttempt(
   let page: import("playwright").Page | null = null;
   let firefoxServer: import("playwright").BrowserServer | undefined;
   let keepFirefoxAlive = false;
-  let chromeReused = false;
   let firefoxApp = config.firefoxApp;
   if (config.browser === "firefox" && process.platform === "darwin") {
     try {
@@ -180,7 +179,6 @@ async function runAttempt(
         logger,
       });
       browser = connection.browser;
-      chromeReused = connection.reused;
       config.debugPort = connection.debugPort;
       config.browserPid = connection.browserPid;
       await saveRunConfig(config.runPath, config);
@@ -403,6 +401,7 @@ async function runAttempt(
               logger(
                 `[attachments] uploaded ${config.attachments.length} file(s)`,
               );
+              await waitForPromptInput(page, 10_000, logger);
             } catch (error) {
               const message =
                 error instanceof Error ? error.message : String(error);
@@ -413,25 +412,83 @@ async function runAttempt(
 
           await writeStatus(config, "running", "submit", "submitting prompt");
           const expectedTurn = await getNextUserTurnNumber(page);
+          const promptNormalized = normalizeForCompare(config.prompt);
+          const beforeSnapshot = await getUserMessageSnapshot(page, promptNormalized);
+          const initialUrl = page.url();
           logger(`[prompt] expecting user turn ${expectedTurn}`);
           const typedValue = await submitPrompt(page, config.prompt, logger);
-          if (typedValue.trim() !== config.prompt.trim()) {
+          const typedNormalized = normalizeForCompare(typedValue);
+          const expectedNormalized = normalizeForCompare(config.prompt);
+          if (typedNormalized !== expectedNormalized) {
             logger(
-              `[prompt] mismatch typed="${typedValue}" expected="${config.prompt}"`,
+              `[prompt] mismatch after submit (typedLen=${typedValue.length}, expectedLen=${config.prompt.length}, typedNormLen=${typedNormalized.length}, expectedNormLen=${expectedNormalized.length})`,
             );
           }
-          const submitted = await waitForUserMessage(
+          let submitted = await waitForUserMessage(
             page,
             config.prompt,
             expectedTurn,
-            8_000,
+            12_000,
+            logger,
           );
           if (!submitted) {
-            logger("[prompt] user message not detected; retrying submit");
-            await submitPrompt(page, config.prompt, logger);
+            const afterSnapshot = await getUserMessageSnapshot(
+              page,
+              promptNormalized,
+            );
+            const firstSignals = await detectSubmissionSignals(
+              page,
+              initialUrl,
+              beforeSnapshot,
+              afterSnapshot,
+              logger,
+              "first-check",
+            );
+            if (firstSignals.submitted) {
+              logger(
+                `[prompt] submission inferred (${firstSignals.reasons.join(",")})`,
+              );
+              submitted = true;
+            } else {
+              logger("[prompt] no submission signals; waiting before retry");
+              await sleep(2000);
+              const afterRetrySnapshot = await getUserMessageSnapshot(
+                page,
+                promptNormalized,
+              );
+              const secondSignals = await detectSubmissionSignals(
+                page,
+                initialUrl,
+                beforeSnapshot,
+                afterRetrySnapshot,
+                logger,
+                "second-check",
+              );
+              if (secondSignals.submitted) {
+                logger(
+                  `[prompt] submission inferred (${secondSignals.reasons.join(",")})`,
+                );
+                submitted = true;
+              } else {
+                logger("[prompt] user message not detected; retrying submit");
+                await submitPrompt(page, config.prompt, logger);
+                submitted = await waitForUserMessage(
+                  page,
+                  config.prompt,
+                  expectedTurn,
+                  12_000,
+                  logger,
+                );
+              }
+            }
+          }
+          if (!submitted) {
+            throw new Error("User message not detected after prompt submission");
           }
           await sleep(1000);
-          await maybeCaptureConversationUrl(page, config);
+          await ensureConversationUrlAfterSubmit(page, config, logger, {
+            allowMissing: isLocalMock,
+          });
           await saveRunConfig(config.runPath, config);
           const thinkingReady = await waitForThinkingPanel(page, logger);
           if (!thinkingReady) {
@@ -535,7 +592,7 @@ async function runAttempt(
     }
     throw error;
   } finally {
-    if (page) {
+    if (page && config.browser !== "chrome") {
       try {
         await page.close();
       } catch (closeError) {
@@ -550,7 +607,7 @@ async function runAttempt(
             await runFirefoxSetupPhase(appName, firefoxPid, logger);
           }
           await disconnectBrowser(browser);
-        } else if (config.browser === "chrome" && chromeReused) {
+        } else if (config.browser === "chrome") {
           await disconnectBrowser(browser);
         } else {
           await browser.close();
@@ -988,6 +1045,75 @@ function truncateText(text: string, maxChars: number): string {
   return text.slice(-maxChars);
 }
 
+function normalizeForCompare(value: string): string {
+  return value
+    .replace(/\r\n/g, "\n")
+    .replace(/\u00a0/g, " ")
+    .replace(/\t/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function detectSubmissionSignals(
+  page: import("playwright").Page,
+  initialUrl: string,
+  beforeSnapshot: { count: number; lastNormalized: string; hasPrompt: boolean },
+  afterSnapshot: { count: number; lastNormalized: string; hasPrompt: boolean },
+  logger: (msg: string) => void,
+  label: string,
+): Promise<{ submitted: boolean; reasons: string[] }> {
+  const urlNow = page.url();
+  const urlChanged =
+    initialUrl !== urlNow && /\/c\//.test(urlNow) && !/\/c\//.test(initialUrl);
+  const generating = await isGenerating(page).catch(() => false);
+  const countIncreased = afterSnapshot.count > beforeSnapshot.count;
+  const lastChanged =
+    afterSnapshot.lastNormalized &&
+    afterSnapshot.lastNormalized !== beforeSnapshot.lastNormalized;
+  const reasons: string[] = [];
+  if (afterSnapshot.hasPrompt) reasons.push("user-message-match");
+  if (countIncreased) reasons.push("user-count-increased");
+  if (lastChanged) reasons.push("user-last-changed");
+  if (urlChanged) reasons.push("url-changed");
+  if (generating) reasons.push("generating");
+  logger(
+    `[prompt] ${label} signals: hasPrompt=${afterSnapshot.hasPrompt} countIncreased=${countIncreased} lastChanged=${lastChanged} urlChanged=${urlChanged} generating=${generating} beforeCount=${beforeSnapshot.count} afterCount=${afterSnapshot.count} beforeLastLen=${beforeSnapshot.lastNormalized.length} afterLastLen=${afterSnapshot.lastNormalized.length}`,
+  );
+  return { submitted: reasons.length > 0, reasons };
+}
+
+async function getUserMessageSnapshot(
+  page: import("playwright").Page,
+  expectedNormalized: string,
+): Promise<{ count: number; lastNormalized: string; hasPrompt: boolean }> {
+  return page.evaluate((args) => {
+    const nodes = Array.from(
+      document.querySelectorAll('[data-message-author-role="user"]'),
+    ) as HTMLElement[];
+    const count = nodes.length;
+    const lastText = count ? nodes[count - 1].innerText || "" : "";
+    const lastNormalized = normalizeText(lastText);
+    let hasPrompt = false;
+    for (const node of nodes) {
+      const text = node.innerText || "";
+      if (normalizeText(text) === args.expectedNormalized) {
+        hasPrompt = true;
+        break;
+      }
+    }
+    return { count, lastNormalized, hasPrompt };
+
+    function normalizeText(value: string): string {
+      return value
+        .replace(/\r\n/g, "\n")
+        .replace(/\u00a0/g, " ")
+        .replace(/\t/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+  }, { expectedNormalized });
+}
+
 async function maybeCaptureConversationUrl(
   page: import("playwright").Page,
   config: RunConfig,
@@ -1000,6 +1126,30 @@ async function maybeCaptureConversationUrl(
   ) {
     config.conversationUrl = url;
   }
+}
+
+async function ensureConversationUrlAfterSubmit(
+  page: import("playwright").Page,
+  config: RunConfig,
+  logger: (msg: string) => void,
+  options: { allowMissing?: boolean } = {},
+): Promise<void> {
+  if (config.conversationUrl) return;
+  const start = Date.now();
+  const timeoutMs = 15_000;
+  while (Date.now() - start < timeoutMs) {
+    await maybeCaptureConversationUrl(page, config);
+    if (config.conversationUrl) {
+      logger(`[prompt] conversation URL detected: ${config.conversationUrl}`);
+      return;
+    }
+    await sleep(250);
+  }
+  if (options.allowMissing) {
+    logger("[prompt] conversation URL not detected (local mock)");
+    return;
+  }
+  throw new Error("Conversation URL not detected after prompt submission");
 }
 
 function attachNetworkTracing(
@@ -1196,6 +1346,9 @@ async function resubmitPrompt(
   await writeStatus(config, "running", "submit", "resubmitting prompt");
   await waitForPromptInput(page, 30_000, logger);
   const expectedTurn = await getNextUserTurnNumber(page);
+  const promptNormalized = normalizeForCompare(config.prompt);
+  const beforeSnapshot = await getUserMessageSnapshot(page, promptNormalized);
+  const initialUrl = page.url();
   logger(`[prompt] resubmit expecting user turn ${expectedTurn}`);
   const typedValue = await submitPrompt(page, config.prompt, logger);
   if (typedValue.trim() !== config.prompt.trim()) {
@@ -1206,9 +1359,28 @@ async function resubmitPrompt(
     config.prompt,
     expectedTurn,
     8_000,
+    logger,
   );
   if (!submitted) {
-    await submitPrompt(page, config.prompt, logger);
+    const afterSnapshot = await getUserMessageSnapshot(
+      page,
+      promptNormalized,
+    );
+    const signals = await detectSubmissionSignals(
+      page,
+      initialUrl,
+      beforeSnapshot,
+      afterSnapshot,
+      logger,
+      "resubmit-check",
+    );
+    if (signals.submitted) {
+      logger(
+        `[prompt] resubmit inferred (${signals.reasons.join(",")}); skipping duplicate`,
+      );
+    } else {
+      await submitPrompt(page, config.prompt, logger);
+    }
   }
   await sleep(1000);
 }

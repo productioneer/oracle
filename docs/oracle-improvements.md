@@ -30,6 +30,28 @@ Findings and decisions from testing session. For Codex implementation.
 
 Migration from Puppeteer to Playwright is required.
 
+### Chrome Window Invariants (macOS)
+
+Derived from `.work/research1.md` (Chrome window/focus review). Required for correctness and zero-focus-steal behavior.
+
+**Invariants:**
+- Exactly **one** Chrome process for the oracle user-data-dir.
+- Exactly **one** Chrome **window** exists after first launch; it must **never be windowless**.
+- The window is **offscreen + minimized** by default, and **never steals focus** unless explicitly revealed for login.
+- Use **CDP window bounds** to enforce hidden state; no UI-scripting or “restore focus” hacks.
+
+**Launch requirements:**
+- Do **not** use `--no-startup-window` (creates a first-window race and flicker).
+- Do **not** rely on `--start-minimized` (not reliable).
+- Create the startup window offscreen via `--window-position=-32000,-32000` (small size ok).
+
+**Lifecycle requirements:**
+- Keep a **persistent tab** (sentinel or ChatGPT tab) to keep the window alive.
+- For Chrome CDP connections: **disconnect only**; do not `browser.close()` or `page.close()` if it would remove the last tab/window.
+
+**Instrumentation:**
+- Log window bounds and windowId at key phases (launch, attach, pre/post submit) to catch regressions.
+
 ---
 
 ## ChatGPT UI Navigation

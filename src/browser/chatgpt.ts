@@ -299,12 +299,6 @@ export async function submitPrompt(
   await waitForPromptInput(page, 30_000, logger);
   const normalizedPrompt = prompt.replace(/\r\n/g, "\n");
   const preparedPrompt = normalizedPrompt.replace(/\t/g, "  ");
-  const normalizeForCompare = (value: string) =>
-    value
-      .replace(/\r\n/g, "\n")
-      .replace(/\u00a0/g, " ")
-      .replace(/\t/g, "  ");
-
   const selector = await waitForSelectorPair(page, SELECTOR_PAIRS.promptInput, logger, {
     timeoutMs: 30_000,
     state: "visible",
@@ -326,23 +320,26 @@ export async function submitPrompt(
       return (el as HTMLElement).innerText || "";
     }, selector);
 
+  const expectedNormalized = normalizeTextForCompare(preparedPrompt);
   let typedValue = "";
+  let typedNormalized = "";
   for (let attempt = 0; attempt < 2; attempt += 1) {
     logDebug(logger, `typing prompt attempt ${attempt + 1}`);
     await clearInput();
     await input.click();
-    await page.keyboard.type(preparedPrompt, { delay: 30 });
+    await page.keyboard.insertText(preparedPrompt);
     await sleep(50);
     typedValue = await readInputValue();
-    if (normalizeForCompare(typedValue) === normalizeForCompare(preparedPrompt)) {
+    typedNormalized = normalizeTextForCompare(typedValue);
+    if (typedNormalized === expectedNormalized) {
       break;
     }
   }
 
-  if (normalizeForCompare(typedValue) !== normalizeForCompare(preparedPrompt)) {
+  if (typedNormalized !== expectedNormalized) {
     logDebug(
       logger,
-      `prompt mismatch (expectedLen=${preparedPrompt.length}, typedLen=${typedValue.length})`,
+      `prompt mismatch (expectedLen=${preparedPrompt.length}, typedLen=${typedValue.length}, expectedNormLen=${expectedNormalized.length}, typedNormLen=${typedNormalized.length})`,
     );
     throw new Error("Prompt entry mismatch after typing");
   }
@@ -375,36 +372,80 @@ export async function waitForUserMessage(
   prompt: string,
   expectedTurn: number,
   timeoutMs = 10_000,
+  logger?: (message: string) => void,
 ): Promise<boolean> {
   const selector = `[data-testid="conversation-turn-${expectedTurn}"]`;
-  const expected = prompt.trim();
+  const expected = normalizeTextForCompare(prompt);
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const found = await page.evaluate(
+    const result = await page.evaluate(
       ({
         selector,
-        text,
         userSelector,
+        expectedNormalized,
       }: {
         selector: string;
-        text: string;
         userSelector: string;
+        expectedNormalized: string;
       }) => {
         const container = document.querySelector(selector);
-        if (!container) return false;
-        const user = container.querySelector(userSelector) as HTMLElement | null;
-        if (!user) return false;
-        const content = (user.innerText || "").trim();
-        return content === text.trim();
+        if (container) {
+          const user = container.querySelector(userSelector) as HTMLElement | null;
+          const text = user ? (user.innerText || "") : "";
+          return { matched: normalizeText(text) === expectedNormalized, fallback: false };
+        }
+        const users = Array.from(document.querySelectorAll(userSelector)) as HTMLElement[];
+        for (const user of users) {
+          const text = user.innerText || "";
+          if (normalizeText(text) === expectedNormalized) {
+            return { matched: true, fallback: true };
+          }
+        }
+        return { matched: false, fallback: false };
+
+        function normalizeText(value: string): string {
+          return value
+            .replace(/\r\n/g, "\n")
+            .replace(/\u00a0/g, " ")
+            .replace(/\t/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+        }
       },
       {
         selector,
-        text: expected,
         userSelector: SELECTORS.userMessage,
+        expectedNormalized: expected,
       },
     );
-    if (found) return true;
+    if (result.matched) {
+      if (result.fallback) {
+        logger?.(
+          `[chatgpt] user message matched via fallback; expected turn ${expectedTurn}`,
+        );
+      }
+      return true;
+    }
     await sleep(300);
+  }
+  if (logger) {
+    const snapshot = await page
+      .evaluate((userSelector) => {
+        const turns = Array.from(
+          document.querySelectorAll('[data-testid^="conversation-turn-"]'),
+        )
+          .map((el) => el.getAttribute("data-testid") || "")
+          .filter(Boolean);
+        const users = Array.from(document.querySelectorAll(userSelector)) as HTMLElement[];
+        const lastUser = users.length ? users[users.length - 1].innerText || "" : "";
+        return { turns, userCount: users.length, lastUserLen: lastUser.length };
+      }, SELECTORS.userMessage)
+      .catch(() => null);
+    if (snapshot) {
+      logger(
+        `[chatgpt] user message not found (expectedTurn=${expectedTurn}, userCount=${snapshot.userCount}, turns=${snapshot.turns.join(",")}, lastUserLen=${snapshot.lastUserLen})`,
+      );
+    }
   }
   return false;
 }
@@ -879,4 +920,13 @@ function logDebug(
   message: string,
 ): void {
   logger?.(`[chatgpt] ${message}`);
+}
+
+function normalizeTextForCompare(value: string): string {
+  return value
+    .replace(/\r\n/g, "\n")
+    .replace(/\u00a0/g, " ")
+    .replace(/\t/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
