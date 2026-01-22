@@ -35,9 +35,11 @@ import {
   ensureChatGptReady,
   ensureModelSelected,
   ensureWideViewport,
+  getSendButtonState,
   getNextUserTurnNumber,
   isGenerating,
   navigateToChat,
+  readPromptInputValue,
   ResponseFailedError,
   ResponseStalledError,
   ResponseTimeoutError,
@@ -151,6 +153,7 @@ async function runAttempt(
   let firefoxServer: import("playwright").BrowserServer | undefined;
   let keepFirefoxAlive = false;
   let firefoxApp = config.firefoxApp;
+  let expectedAssistantTurn: number | undefined;
   if (config.browser === "firefox" && process.platform === "darwin") {
     try {
       firefoxApp = firefoxApp ?? resolveFirefoxApp();
@@ -365,10 +368,26 @@ async function runAttempt(
           }
         }
 
+        const promptNormalized = normalizeForCompare(config.prompt);
+        const promptMatchCandidates = buildPromptMatchCandidates(config.prompt);
         const alreadySubmitted = await promptAlreadySubmitted(
           page,
           config.prompt,
         );
+        if (alreadySubmitted) {
+          const inferredTurn = await findUserTurnNumberForPrompt(
+            page,
+            promptMatchCandidates,
+          );
+          if (inferredTurn) {
+            expectedAssistantTurn = inferredTurn + 1;
+            logger(
+              `[prompt] existing prompt detected at turn ${inferredTurn}; expecting assistant turn ${expectedAssistantTurn}`,
+            );
+          } else {
+            logger("[prompt] existing prompt detected; turn number not found");
+          }
+        }
         if (!alreadySubmitted) {
           if (config.conversationUrl) {
             const generating = await isGenerating(page);
@@ -411,10 +430,13 @@ async function runAttempt(
           }
 
           await writeStatus(config, "running", "submit", "submitting prompt");
-          const expectedTurn = await getNextUserTurnNumber(page);
-          const promptNormalized = normalizeForCompare(config.prompt);
-          const beforeSnapshot = await getUserMessageSnapshot(page, promptNormalized);
-          const initialUrl = page.url();
+          let expectedTurn = await getNextUserTurnNumber(page);
+          const beforeSnapshot = await getUserMessageSnapshot(
+            page,
+            promptMatchCandidates,
+          );
+          const baselineMaxTurn = beforeSnapshot.maxTurnNumber ?? 0;
+          expectedAssistantTurn = expectedTurn + 1;
           logger(`[prompt] expecting user turn ${expectedTurn}`);
           const typedValue = await submitPrompt(page, config.prompt, logger);
           const typedNormalized = normalizeForCompare(typedValue);
@@ -430,55 +452,131 @@ async function runAttempt(
             expectedTurn,
             12_000,
             logger,
+            { normalizedCandidates: promptMatchCandidates },
           );
+          if (!submitted) {
+            const inferredTurn = await findUserTurnNumberForPrompt(
+              page,
+              promptMatchCandidates,
+              baselineMaxTurn,
+            );
+            if (inferredTurn) {
+              expectedTurn = inferredTurn;
+              expectedAssistantTurn = inferredTurn + 1;
+              submitted = true;
+              logger(
+                `[prompt] detected prompt at turn ${inferredTurn} (baselineMaxTurn=${baselineMaxTurn})`,
+              );
+            }
+          }
           if (!submitted) {
             const afterSnapshot = await getUserMessageSnapshot(
               page,
-              promptNormalized,
+              promptMatchCandidates,
             );
             const firstSignals = await detectSubmissionSignals(
               page,
-              initialUrl,
               beforeSnapshot,
               afterSnapshot,
+              expectedNormalized,
               logger,
               "first-check",
             );
             if (firstSignals.submitted) {
               logger(
-                `[prompt] submission inferred (${firstSignals.reasons.join(",")})`,
+                `[prompt] submission signals (${firstSignals.reasons.join(",")})`,
               );
+            }
+            const advancedTurn = inferNewUserTurnNumber(
+              beforeSnapshot,
+              afterSnapshot,
+            );
+            if (advancedTurn) {
+              expectedTurn = advancedTurn;
+              expectedAssistantTurn = advancedTurn + 1;
               submitted = true;
-            } else {
-              logger("[prompt] no submission signals; waiting before retry");
+              logger(
+                `[prompt] inferred user turn ${advancedTurn} from last user turn advance`,
+              );
+            }
+            if (!submitted) {
+              const inferredTurn = await findUserTurnNumberForPrompt(
+                page,
+                promptMatchCandidates,
+                baselineMaxTurn,
+              );
+              if (inferredTurn) {
+                expectedTurn = inferredTurn;
+                expectedAssistantTurn = inferredTurn + 1;
+                submitted = true;
+                logger(
+                  `[prompt] detected prompt at turn ${inferredTurn} after signals`,
+                );
+              }
+            }
+            if (!submitted) {
+              logger("[prompt] user message not detected; waiting before retry");
               await sleep(2000);
               const afterRetrySnapshot = await getUserMessageSnapshot(
                 page,
-                promptNormalized,
+                promptMatchCandidates,
               );
               const secondSignals = await detectSubmissionSignals(
                 page,
-                initialUrl,
                 beforeSnapshot,
                 afterRetrySnapshot,
+                expectedNormalized,
                 logger,
                 "second-check",
               );
               if (secondSignals.submitted) {
                 logger(
-                  `[prompt] submission inferred (${secondSignals.reasons.join(",")})`,
+                  `[prompt] submission signals (${secondSignals.reasons.join(",")})`,
                 );
+              }
+              const retryAdvanced = inferNewUserTurnNumber(
+                beforeSnapshot,
+                afterRetrySnapshot,
+              );
+              if (retryAdvanced) {
+                expectedTurn = retryAdvanced;
+                expectedAssistantTurn = retryAdvanced + 1;
                 submitted = true;
-              } else {
-                logger("[prompt] user message not detected; retrying submit");
-                await submitPrompt(page, config.prompt, logger);
-                submitted = await waitForUserMessage(
-                  page,
-                  config.prompt,
-                  expectedTurn,
-                  12_000,
-                  logger,
+                logger(
+                  `[prompt] inferred user turn ${retryAdvanced} after retry snapshot`,
                 );
+              }
+              if (!submitted) {
+                const retryTurn = await findUserTurnNumberForPrompt(
+                  page,
+                  promptMatchCandidates,
+                  baselineMaxTurn,
+                );
+                if (retryTurn) {
+                  expectedTurn = retryTurn;
+                  expectedAssistantTurn = retryTurn + 1;
+                  submitted = true;
+                  logger(
+                    `[prompt] detected prompt at turn ${retryTurn} after retry wait`,
+                  );
+                } else if (
+                  secondSignals.promptStillPresent &&
+                  secondSignals.sendEnabled &&
+                  !secondSignals.countIncreased &&
+                  !secondSignals.lastChanged &&
+                  !secondSignals.turnAdvanced
+                ) {
+                  logger("[prompt] no submit detected; retrying send click");
+                  await submitPrompt(page, config.prompt, logger);
+                  submitted = await waitForUserMessage(
+                    page,
+                    config.prompt,
+                    expectedTurn,
+                    12_000,
+                    logger,
+                    { normalizedCandidates: promptMatchCandidates },
+                  );
+                }
               }
             }
           }
@@ -508,6 +606,7 @@ async function runAttempt(
           config,
           runDir,
           logger,
+          expectedAssistantTurn,
         );
 
         if (
@@ -542,7 +641,7 @@ async function runAttempt(
         logger(
           `[worker] detached frame detected; recreating page (${pageAttempt + 1}/2)`,
         );
-        if (page) {
+        if (page && config.browser !== "chrome") {
           try {
             await page.close();
           } catch (closeError) {
@@ -580,6 +679,7 @@ async function runAttempt(
         logger,
         runDir,
         recoveryAttempt > 0,
+        error,
       );
       if (recovered) {
         return "retry";
@@ -606,9 +706,9 @@ async function runAttempt(
           if (!config.allowVisible) {
             await runFirefoxSetupPhase(appName, firefoxPid, logger);
           }
-          await disconnectBrowser(browser);
+          await disconnectBrowser(browser, { allowClose: false, logger });
         } else if (config.browser === "chrome") {
-          await disconnectBrowser(browser);
+          await disconnectBrowser(browser, { allowClose: false, logger });
         } else {
           await browser.close();
           if (config.browser === "firefox" && firefoxServer) {
@@ -635,6 +735,7 @@ async function attemptRecovery(
   logger: (msg: string) => void,
   runDir: string,
   allowPersonalRestart: boolean,
+  error?: unknown,
 ): Promise<boolean> {
   if (await isCanceled(runDir)) {
     await finalizeCanceled(config, logger, "Canceled during run");
@@ -643,6 +744,14 @@ async function attemptRecovery(
   if (!browser || !page) return false;
 
   await writeStatus(config, "running", "recovery", "checking browser health");
+  const errorMessage = error instanceof Error ? error.message : String(error ?? "");
+  if (errorMessage) {
+    logger(`[recovery] error: ${errorMessage}`);
+  }
+  if (shouldSkipRecovery(errorMessage)) {
+    logger("[recovery] skipping restart for non-browser error");
+    return false;
+  }
   logger("[recovery] health check");
   const debug = config.debugPort
     ? await checkDebugEndpoint(config.debugPort)
@@ -653,6 +762,10 @@ async function attemptRecovery(
   logger(
     `[recovery] debug=${debug.ok} runtime=${runtime.ok} page=${pageHealth.ok}`,
   );
+  if (debug.ok && pageHealth.ok && !runtime.ok) {
+    logger("[recovery] runtime check failed but page is responsive; skipping restart");
+    return false;
+  }
   if (debug.ok) {
     try {
       await page.evaluate(() => window.stop());
@@ -669,7 +782,12 @@ async function attemptRecovery(
     logger(
       `[recovery] post-reload runtime=${postRuntime.ok} page=${postPage.ok}`,
     );
-    if (postRuntime.ok && postPage.ok) {
+    if (postPage.ok) {
+      if (!postRuntime.ok) {
+        logger(
+          "[recovery] runtime check failed after reload but page is responsive; skipping restart",
+        );
+      }
       return false;
     }
   }
@@ -730,17 +848,34 @@ async function attemptRecovery(
   let terminated = true;
   if (config.browserPid) {
     const pid = config.browserPid;
-    logger(`[recovery] attempting graceful shutdown for chrome pid ${pid}`);
-    terminated = await shutdownChromePid(
-      pid,
-      logger,
-      10_000,
-      process.env.ORACLE_FORCE_KILL === "1",
-    );
+    terminated = false;
+    if (debug.ok) {
+      const requested = await requestChromeShutdown(browser, logger);
+      if (requested) {
+        const exited = await waitForPidExit(pid, 8_000);
+        if (exited) {
+          logger(`[recovery] chrome pid ${pid} exited after Browser.close`);
+          terminated = true;
+        } else {
+          logger(
+            `[recovery] chrome pid ${pid} still alive after Browser.close`,
+          );
+        }
+      }
+    }
     if (!terminated) {
-      logger(
-        `[recovery] chrome pid ${pid} did not exit after graceful shutdown`,
+      logger(`[recovery] attempting graceful shutdown for chrome pid ${pid}`);
+      terminated = await shutdownChromePid(
+        pid,
+        logger,
+        10_000,
+        process.env.ORACLE_FORCE_KILL === "1",
       );
+      if (!terminated) {
+        logger(
+          `[recovery] chrome pid ${pid} did not exit after graceful shutdown`,
+        );
+      }
     }
   }
 
@@ -818,6 +953,34 @@ async function shutdownChromePid(
   return !isProcessAlive(pid);
 }
 
+async function requestChromeShutdown(
+  browser: import("playwright").Browser,
+  logger: (msg: string) => void,
+): Promise<boolean> {
+  try {
+    const cdp = await (browser as any).newBrowserCDPSession?.();
+    if (!cdp) {
+      logger("[recovery] Browser.close unavailable; skipping CDP shutdown");
+      return false;
+    }
+    await cdp.send("Browser.close");
+    await cdp.detach().catch(() => null);
+    return true;
+  } catch (error) {
+    logger(`[recovery] Browser.close failed: ${String(error)}`);
+    return false;
+  }
+}
+
+async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (!isProcessAlive(pid)) return true;
+    await sleep(250);
+  }
+  return !isProcessAlive(pid);
+}
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -868,13 +1031,25 @@ async function promptAlreadySubmitted(
   page: import("playwright").Page,
   prompt: string,
 ): Promise<boolean> {
-  const trimmed = prompt.trim();
+  const normalized = normalizeForCompare(prompt);
   return page.evaluate((needle) => {
     const nodes = Array.from(
       document.querySelectorAll('[data-message-author-role="user"]'),
     ) as HTMLElement[];
-    return nodes.some((node) => (node.innerText || "").trim() === needle);
-  }, trimmed);
+    if (nodes.length === 0) return false;
+    const last = nodes[nodes.length - 1];
+    const text = last?.innerText || "";
+    return normalizeText(text) === needle;
+
+    function normalizeText(value: string): string {
+      return value
+        .replace(/\r\n/g, "\n")
+        .replace(/\u00a0/g, " ")
+        .replace(/\t/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+  }, normalized);
 }
 
 function assertChatGptUrl(url: string, label: string): void {
@@ -1054,54 +1229,134 @@ function normalizeForCompare(value: string): string {
     .trim();
 }
 
+function inferNewUserTurnNumber(
+  before: { lastTurnNumber: number | null },
+  after: { lastTurnNumber: number | null },
+): number | null {
+  if (typeof after.lastTurnNumber !== "number") return null;
+  if (typeof before.lastTurnNumber !== "number") return after.lastTurnNumber;
+  if (after.lastTurnNumber > before.lastTurnNumber) return after.lastTurnNumber;
+  return null;
+}
+
+function buildPromptMatchCandidates(prompt: string): string[] {
+  const normalized = normalizeForCompare(prompt);
+  const stripped = normalizeForCompare(stripAttachmentMarkers(prompt));
+  const unique = new Set<string>();
+  if (normalized) unique.add(normalized);
+  if (stripped) unique.add(stripped);
+  return Array.from(unique);
+}
+
+function stripAttachmentMarkers(prompt: string): string {
+  return prompt.replace(/\[attached:[^\]]+\]/gi, "");
+}
+
 async function detectSubmissionSignals(
   page: import("playwright").Page,
-  initialUrl: string,
-  beforeSnapshot: { count: number; lastNormalized: string; hasPrompt: boolean },
-  afterSnapshot: { count: number; lastNormalized: string; hasPrompt: boolean },
+  beforeSnapshot: {
+    count: number;
+    lastNormalized: string;
+    lastMatchesPrompt: boolean;
+    maxTurnNumber: number | null;
+  },
+  afterSnapshot: {
+    count: number;
+    lastNormalized: string;
+    lastMatchesPrompt: boolean;
+    maxTurnNumber: number | null;
+  },
+  expectedNormalized: string,
   logger: (msg: string) => void,
   label: string,
-): Promise<{ submitted: boolean; reasons: string[] }> {
-  const urlNow = page.url();
-  const urlChanged =
-    initialUrl !== urlNow && /\/c\//.test(urlNow) && !/\/c\//.test(initialUrl);
-  const generating = await isGenerating(page).catch(() => false);
+): Promise<{
+  submitted: boolean;
+  reasons: string[];
+  promptStillPresent: boolean;
+  sendEnabled: boolean;
+  countIncreased: boolean;
+  lastChanged: boolean;
+  turnAdvanced: boolean;
+}> {
+  const inputResult = await readPromptInputValue(page, logger);
+  const inputNormalized = normalizeForCompare(inputResult.value);
+  const inputMatchesPrompt =
+    inputResult.found && inputNormalized === expectedNormalized;
+  const inputCleared = inputResult.found && !inputNormalized;
+  const sendState = await getSendButtonState(page, logger);
   const countIncreased = afterSnapshot.count > beforeSnapshot.count;
   const lastChanged =
-    afterSnapshot.lastNormalized &&
+    Boolean(afterSnapshot.lastNormalized) &&
     afterSnapshot.lastNormalized !== beforeSnapshot.lastNormalized;
+  const turnAdvanced =
+    typeof afterSnapshot.maxTurnNumber === "number" &&
+    typeof beforeSnapshot.maxTurnNumber === "number" &&
+    afterSnapshot.maxTurnNumber > beforeSnapshot.maxTurnNumber;
   const reasons: string[] = [];
-  if (afterSnapshot.hasPrompt) reasons.push("user-message-match");
+  if (afterSnapshot.lastMatchesPrompt) reasons.push("user-last-matched");
   if (countIncreased) reasons.push("user-count-increased");
   if (lastChanged) reasons.push("user-last-changed");
-  if (urlChanged) reasons.push("url-changed");
-  if (generating) reasons.push("generating");
+  if (inputCleared) reasons.push("input-cleared");
+  if (turnAdvanced) reasons.push("turn-advanced");
   logger(
-    `[prompt] ${label} signals: hasPrompt=${afterSnapshot.hasPrompt} countIncreased=${countIncreased} lastChanged=${lastChanged} urlChanged=${urlChanged} generating=${generating} beforeCount=${beforeSnapshot.count} afterCount=${afterSnapshot.count} beforeLastLen=${beforeSnapshot.lastNormalized.length} afterLastLen=${afterSnapshot.lastNormalized.length}`,
+    `[prompt] ${label} signals: lastMatchesPrompt=${afterSnapshot.lastMatchesPrompt} countIncreased=${countIncreased} lastChanged=${lastChanged} turnAdvanced=${turnAdvanced} inputFound=${inputResult.found} inputMatchesPrompt=${inputMatchesPrompt} inputLen=${inputNormalized.length} sendEnabled=${sendState.enabled} beforeCount=${beforeSnapshot.count} afterCount=${afterSnapshot.count} beforeMaxTurn=${beforeSnapshot.maxTurnNumber} afterMaxTurn=${afterSnapshot.maxTurnNumber} beforeLastLen=${beforeSnapshot.lastNormalized.length} afterLastLen=${afterSnapshot.lastNormalized.length}`,
   );
-  return { submitted: reasons.length > 0, reasons };
+  return {
+    submitted: reasons.length > 0,
+    reasons,
+    promptStillPresent: inputMatchesPrompt,
+    sendEnabled: sendState.enabled,
+    countIncreased,
+    lastChanged,
+    turnAdvanced,
+  };
 }
 
 async function getUserMessageSnapshot(
   page: import("playwright").Page,
-  expectedNormalized: string,
-): Promise<{ count: number; lastNormalized: string; hasPrompt: boolean }> {
+  expectedCandidates: string[],
+): Promise<{
+  count: number;
+  lastNormalized: string;
+  lastMatchesPrompt: boolean;
+  lastTurnNumber: number | null;
+  maxTurnNumber: number | null;
+}> {
   return page.evaluate((args) => {
     const nodes = Array.from(
       document.querySelectorAll('[data-message-author-role="user"]'),
     ) as HTMLElement[];
+    const turnNumbers = Array.from(
+      document.querySelectorAll('[data-testid^="conversation-turn-"]'),
+    )
+      .map((el) => {
+        const id = el.getAttribute("data-testid") || "";
+        const match = id.match(/conversation-turn-(\d+)/);
+        return match ? Number(match[1]) : NaN;
+      })
+      .filter((value) => Number.isFinite(value)) as number[];
+    const maxTurnNumber = turnNumbers.length ? Math.max(...turnNumbers) : null;
     const count = nodes.length;
     const lastText = count ? nodes[count - 1].innerText || "" : "";
     const lastNormalized = normalizeText(lastText);
-    let hasPrompt = false;
-    for (const node of nodes) {
-      const text = node.innerText || "";
-      if (normalizeText(text) === args.expectedNormalized) {
-        hasPrompt = true;
-        break;
-      }
+    const lastMatchesPrompt = args.expectedCandidates.some((candidate: string) =>
+      matchesExpected(lastNormalized, candidate),
+    );
+    let lastTurnNumber: number | null = null;
+    if (count) {
+      const lastNode = nodes[count - 1];
+      const turn = lastNode.closest('[data-testid^="conversation-turn-"]');
+      const id = turn?.getAttribute("data-testid") || "";
+      const match = id.match(/conversation-turn-(\d+)/);
+      if (match) lastTurnNumber = Number(match[1]);
     }
-    return { count, lastNormalized, hasPrompt };
+    return {
+      count,
+      lastNormalized,
+      lastMatchesPrompt,
+      lastTurnNumber,
+      maxTurnNumber,
+    };
 
     function normalizeText(value: string): string {
       return value
@@ -1111,7 +1366,72 @@ async function getUserMessageSnapshot(
         .replace(/\s+/g, " ")
         .trim();
     }
-  }, { expectedNormalized });
+
+    function matchesExpected(value: string, expected: string): boolean {
+      if (!value) return false;
+      if (value === expected) return true;
+      if (expected.length > 200) {
+        const prefix = expected.slice(0, 200);
+        return value.startsWith(prefix);
+      }
+      return false;
+    }
+  }, { expectedCandidates });
+}
+
+async function findUserTurnNumberForPrompt(
+  page: import("playwright").Page,
+  expectedCandidates: string[],
+  minTurnNumber?: number,
+): Promise<number | null> {
+  return page.evaluate(
+    ({ candidates, minTurn }) => {
+    const turns = Array.from(
+      document.querySelectorAll('[data-testid^="conversation-turn-"]'),
+    ) as HTMLElement[];
+    let matched: number | null = null;
+    for (const turn of turns) {
+      const id = turn.getAttribute("data-testid") || "";
+      const match = id.match(/conversation-turn-(\d+)/);
+      if (!match) continue;
+      const turnNumber = Number(match[1]);
+      if (Number.isFinite(minTurn) && turnNumber <= (minTurn as number)) {
+        continue;
+      }
+      const user = turn.querySelector(
+        '[data-message-author-role="user"]',
+      ) as HTMLElement | null;
+      if (!user) continue;
+      const text = normalizeText(user.innerText || "");
+      const candidateMatch = candidates.some((candidate: string) =>
+        matchesExpected(text, candidate),
+      );
+      if (!candidateMatch) continue;
+      matched = turnNumber;
+    }
+    return matched;
+
+    function normalizeText(value: string): string {
+      return value
+        .replace(/\r\n/g, "\n")
+        .replace(/\u00a0/g, " ")
+        .replace(/\t/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    function matchesExpected(value: string, expected: string): boolean {
+      if (!value) return false;
+      if (value === expected) return true;
+      if (expected.length > 200) {
+        const prefix = expected.slice(0, 200);
+        return value.startsWith(prefix);
+      }
+      return false;
+    }
+    },
+    { candidates: expectedCandidates, minTurn: minTurnNumber ?? null },
+  );
 }
 
 async function maybeCaptureConversationUrl(
@@ -1136,7 +1456,7 @@ async function ensureConversationUrlAfterSubmit(
 ): Promise<void> {
   if (config.conversationUrl) return;
   const start = Date.now();
-  const timeoutMs = 15_000;
+  const timeoutMs = 30_000;
   while (Date.now() - start < timeoutMs) {
     await maybeCaptureConversationUrl(page, config);
     if (config.conversationUrl) {
@@ -1208,6 +1528,16 @@ function mergeFocusNeeds(
   }
 }
 
+function shouldSkipRecovery(message: string): boolean {
+  if (!message) return false;
+  return (
+    message.includes("User message not detected after prompt submission") ||
+    message.includes("Prompt entry mismatch after typing") ||
+    message.includes("Conversation URL not detected after prompt submission") ||
+    message.includes("Prompt input not available")
+  );
+}
+
 async function injectTextDocsCapture(
   page: import("playwright").Page,
   logger: (msg: string) => void,
@@ -1252,6 +1582,7 @@ async function waitForCompletionWithCancel(
   config: RunConfig,
   runDir: string,
   logger: (msg: string) => void,
+  expectedAssistantTurn?: number,
 ): Promise<import("./browser/chatgpt.js").WaitForCompletionResult> {
   let done = false;
   const heartbeatTimer = setInterval(() => {
@@ -1278,6 +1609,7 @@ async function waitForCompletionWithCancel(
         timeoutMs: config.timeoutMs,
         pollMs: config.pollMs,
         prompt: config.prompt,
+        expectedAssistantTurn,
         logger,
       }),
       cancelWatcher,
@@ -1295,7 +1627,10 @@ async function waitForCompletionWithCancel(
         if (error instanceof ResponseFailedError) {
           if (resubmitted) throw error;
           resubmitted = true;
-          await resubmitPrompt(page, config, logger);
+          const resubmittedTurn = await resubmitPrompt(page, config, logger);
+          if (resubmittedTurn) {
+            expectedAssistantTurn = resubmittedTurn;
+          }
           await maybeCaptureConversationUrl(page, config);
           await saveRunConfig(config.runPath, config);
           continue;
@@ -1329,60 +1664,134 @@ async function refreshAfterStall(
 
 async function disconnectBrowser(
   browser: import("playwright").Browser,
+  options: { allowClose?: boolean; logger?: (msg: string) => void } = {},
 ): Promise<void> {
   const maybeDisconnect = (browser as any).disconnect;
   if (typeof maybeDisconnect === "function") {
     await maybeDisconnect.call(browser);
-  } else {
-    await browser.close();
+    return;
   }
+  if (options.allowClose === false) {
+    options.logger?.(
+      "[browser] disconnect unavailable; leaving browser open",
+    );
+    return;
+  }
+  await browser.close();
 }
 
 async function resubmitPrompt(
   page: import("playwright").Page,
   config: RunConfig,
   logger: (msg: string) => void,
-): Promise<void> {
+): Promise<number | undefined> {
   await writeStatus(config, "running", "submit", "resubmitting prompt");
   await waitForPromptInput(page, 30_000, logger);
-  const expectedTurn = await getNextUserTurnNumber(page);
+  let expectedTurn = await getNextUserTurnNumber(page);
+  const promptMatchCandidates = buildPromptMatchCandidates(config.prompt);
   const promptNormalized = normalizeForCompare(config.prompt);
-  const beforeSnapshot = await getUserMessageSnapshot(page, promptNormalized);
-  const initialUrl = page.url();
+  const beforeSnapshot = await getUserMessageSnapshot(
+    page,
+    promptMatchCandidates,
+  );
+  const baselineMaxTurn = beforeSnapshot.maxTurnNumber ?? 0;
   logger(`[prompt] resubmit expecting user turn ${expectedTurn}`);
   const typedValue = await submitPrompt(page, config.prompt, logger);
   if (typedValue.trim() !== config.prompt.trim()) {
     // Best-effort; continue even if input doesn't echo exactly.
   }
-  const submitted = await waitForUserMessage(
+  let submitted = await waitForUserMessage(
     page,
     config.prompt,
     expectedTurn,
     8_000,
     logger,
+    { normalizedCandidates: promptMatchCandidates },
   );
+  if (!submitted) {
+    const inferredTurn = await findUserTurnNumberForPrompt(
+      page,
+      promptMatchCandidates,
+      baselineMaxTurn,
+    );
+    if (inferredTurn) {
+      expectedTurn = inferredTurn;
+      submitted = true;
+      logger(
+        `[prompt] resubmit detected prompt at turn ${inferredTurn} (baselineMaxTurn=${baselineMaxTurn})`,
+      );
+    }
+  }
   if (!submitted) {
     const afterSnapshot = await getUserMessageSnapshot(
       page,
-      promptNormalized,
+      promptMatchCandidates,
     );
     const signals = await detectSubmissionSignals(
       page,
-      initialUrl,
       beforeSnapshot,
       afterSnapshot,
+      promptNormalized,
       logger,
       "resubmit-check",
     );
-    if (signals.submitted) {
+    const advancedTurn = inferNewUserTurnNumber(beforeSnapshot, afterSnapshot);
+    if (advancedTurn) {
+      expectedTurn = advancedTurn;
+      submitted = true;
+      logger(
+        `[prompt] resubmit inferred user turn ${advancedTurn} from last user turn advance`,
+      );
+    }
+    if (signals.submitted && !submitted) {
       logger(
         `[prompt] resubmit inferred (${signals.reasons.join(",")}); skipping duplicate`,
       );
-    } else {
-      await submitPrompt(page, config.prompt, logger);
+      const inferredTurn = await findUserTurnNumberForPrompt(
+        page,
+        promptMatchCandidates,
+        baselineMaxTurn,
+      );
+      if (inferredTurn) {
+        expectedTurn = inferredTurn;
+        submitted = true;
+      } else {
+        submitted = await waitForUserMessage(
+          page,
+          config.prompt,
+          expectedTurn,
+          8_000,
+          logger,
+          { normalizedCandidates: promptMatchCandidates },
+        );
+      }
+    }
+    if (!submitted) {
+      if (
+        signals.promptStillPresent &&
+        signals.sendEnabled &&
+        !signals.countIncreased &&
+        !signals.lastChanged &&
+        !signals.turnAdvanced
+      ) {
+        logger("[prompt] resubmit send did not register; retrying send click");
+        await submitPrompt(page, config.prompt, logger);
+        submitted = await waitForUserMessage(
+          page,
+          config.prompt,
+          expectedTurn,
+          8_000,
+          logger,
+          { normalizedCandidates: promptMatchCandidates },
+        );
+      }
     }
   }
+  if (!submitted) {
+    throw new Error("User message not detected after resubmit");
+  }
   await sleep(1000);
+  return expectedTurn + 1;
 }
 
 async function isCanceled(runDir: string): Promise<boolean> {

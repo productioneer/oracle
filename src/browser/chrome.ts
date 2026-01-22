@@ -24,6 +24,9 @@ export type ChromeConnection = {
   reused: boolean;
 };
 
+const MIN_WINDOW_WIDTH = 1280;
+const MIN_WINDOW_HEIGHT = 800;
+
 export async function launchChrome(
   options: ChromeLaunchOptions,
 ): Promise<ChromeConnection> {
@@ -51,6 +54,7 @@ export async function launchChrome(
     `--user-data-dir=${userDataDir}`,
     "--no-first-run",
     "--no-default-browser-check",
+    "--disable-session-crashed-bubble",
     "--window-size=1440,900",
     "--window-position=-32000,-32000",
     "--disable-background-timer-throttling",
@@ -160,8 +164,8 @@ async function hideChromeWindowForPage(
           bounds: {
             left: -32000,
             top: -32000,
-            width: 800,
-            height: 600,
+            width: MIN_WINDOW_WIDTH,
+            height: MIN_WINDOW_HEIGHT,
           },
         });
         await client.send("Browser.setWindowBounds", {
@@ -278,11 +282,37 @@ async function hideChromeWindowById(
   const isMinimized = bounds?.bounds?.windowState === "minimized";
   const left = bounds?.bounds?.left ?? 0;
   const top = bounds?.bounds?.top ?? 0;
+  const width = bounds?.bounds?.width ?? MIN_WINDOW_WIDTH;
+  const height = bounds?.bounds?.height ?? MIN_WINDOW_HEIGHT;
   const offscreen = left <= -2000 && top <= -2000;
-  if (!offscreen) {
+  const widthTooSmall = width < MIN_WINDOW_WIDTH;
+  const heightTooSmall = height < MIN_WINDOW_HEIGHT;
+  if (widthTooSmall || heightTooSmall) {
+    logger?.(
+      `[chrome] window ${windowId} size too small (${width}x${height}); resizing to at least ${MIN_WINDOW_WIDTH}x${MIN_WINDOW_HEIGHT}`,
+    );
     await cdp.send("Browser.setWindowBounds", {
       windowId,
-      bounds: { left: -32000, top: -32000, width: 800, height: 600 },
+      bounds: {
+        left,
+        top,
+        width: Math.max(width, MIN_WINDOW_WIDTH),
+        height: Math.max(height, MIN_WINDOW_HEIGHT),
+      },
+    });
+  }
+  if (!offscreen) {
+    logger?.(
+      `[chrome] window ${windowId} moving offscreen (${MIN_WINDOW_WIDTH}x${MIN_WINDOW_HEIGHT})`,
+    );
+    await cdp.send("Browser.setWindowBounds", {
+      windowId,
+      bounds: {
+        left: -32000,
+        top: -32000,
+        width: Math.max(width, MIN_WINDOW_WIDTH),
+        height: Math.max(height, MIN_WINDOW_HEIGHT),
+      },
     });
   }
   if (!isMinimized) {

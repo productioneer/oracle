@@ -76,18 +76,38 @@ async function uploadSingleAttachment(
   logDebug(logger, `starting upload for ${attachment.displayName}`);
 
   const strategy = resolveUploadStrategy();
-  logDebug(logger, `upload strategy=${strategy}`);
-  if (strategy === "filechooser") {
-    await uploadViaFileChooser(page, attachment, logger);
-  } else if (strategy === "direct") {
-    await uploadViaDirectInput(page, attachment, logger);
-  } else {
-    await uploadViaMenuInput(page, attachment, logger);
+  const strategyOrder = buildUploadStrategyOrder(strategy);
+  logDebug(logger, `upload strategy=${strategy} order=${strategyOrder.join(",")}`);
+  let lastError: unknown;
+  for (const attempt of strategyOrder) {
+    try {
+      logDebug(logger, `upload attempt strategy=${attempt}`);
+      if (attempt === "filechooser") {
+        await uploadViaFileChooser(page, attachment, logger);
+      } else if (attempt === "direct") {
+        await uploadViaDirectInput(page, attachment, logger);
+      } else {
+        await uploadViaMenuInput(page, attachment, logger);
+      }
+      await waitForRemoveButton(page, removeCount, attachment.displayName, logger);
+      await waitForUploadComplete(page, attachment.displayName, logger);
+      await assertNoNativeDialogOpen(logger);
+      return;
+    } catch (error) {
+      lastError = error;
+      logDebug(
+        logger,
+        `upload attempt failed (${attempt}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+      await assertNoNativeDialogOpen(logger).catch((closeError) => {
+        logDebug(
+          logger,
+          `native dialog cleanup failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
+        );
+      });
+    }
   }
-
-  await waitForRemoveButton(page, removeCount, attachment.displayName, logger);
-  await waitForUploadComplete(page, attachment.displayName, logger);
-  await assertNoNativeDialogOpen(logger);
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 async function openAttachmentMenu(
@@ -119,6 +139,15 @@ async function uploadViaMenuInput(
     logDebug(logger, `setInputFiles (menu direct) for ${attachment.displayName}`);
     return;
   }
+  await page
+    .waitForSelector(SELECTORS.fileInputSecondary, { timeout: 2_000 })
+    .catch(() => null);
+  const waitedSelector = await resolveExistingInputSelector(page, logger);
+  if (waitedSelector) {
+    await page.locator(waitedSelector).setInputFiles(attachment.path);
+    logDebug(logger, `setInputFiles (menu wait) for ${attachment.displayName}`);
+    return;
+  }
   const [chooser] = await Promise.all([
     page.waitForEvent("filechooser", { timeout: 10_000 }),
     page.getByText(SELECTORS.uploadMenuText).click(),
@@ -137,6 +166,12 @@ async function uploadViaDirectInput(
     logDebug(logger, "file input missing; opening attachment menu");
     await openAttachmentMenu(page, logger);
     directSelector = await resolveExistingInputSelector(page, logger);
+    if (!directSelector) {
+      await page
+        .waitForSelector(SELECTORS.fileInputSecondary, { timeout: 2_000 })
+        .catch(() => null);
+      directSelector = await resolveExistingInputSelector(page, logger);
+    }
   }
   if (!directSelector) {
     const [chooser] = await Promise.all([
@@ -194,23 +229,43 @@ async function waitForUploadComplete(
   timeoutMs = 30_000,
 ): Promise<void> {
   const start = Date.now();
+  let lastState:
+    | {
+        nameFound: boolean;
+        uploading: boolean;
+        complete: boolean;
+        svgCount: number;
+        circleCount: number;
+        useCount: number;
+      }
+    | null = null;
   while (Date.now() - start < timeoutMs) {
     const state = (await page.evaluate(
       ({ containerSelector, name }) => {
         const container = document.querySelector(containerSelector);
         if (!container) {
-          return { nameFound: false, uploading: false, complete: false };
+          return {
+            nameFound: false,
+            uploading: false,
+            complete: false,
+            svgCount: 0,
+            circleCount: 0,
+            useCount: 0,
+          };
         }
         const text = (container as HTMLElement).innerText || "";
         const nameFound = text.includes(name);
-        const svgs = Array.from(
-          container.querySelectorAll("svg"),
-        ) as SVGSVGElement[];
+        const nodeContainingName = findNodeWithText(container, name);
+        const scope = nodeContainingName ?? container;
+        const svgs = Array.from(scope.querySelectorAll("svg")) as SVGSVGElement[];
         let hasCircle = false;
         let hasUse = false;
+        let circleCount = 0;
+        let useCount = 0;
         for (const svg of svgs) {
           if (svg.querySelector("circle")) {
             hasCircle = true;
+            circleCount += 1;
           }
           const use = svg.querySelector("use");
           if (use) {
@@ -218,20 +273,48 @@ async function waitForUploadComplete(
               use.getAttribute("href") || use.getAttribute("xlink:href") || "";
             if (href.includes("cdn") || href.includes("sprite")) {
               hasUse = true;
+              useCount += 1;
             }
           }
         }
         return {
           nameFound,
           uploading: hasCircle,
-          complete: hasUse,
+          complete: hasUse || (nameFound && !hasCircle),
+          svgCount: svgs.length,
+          circleCount,
+          useCount,
         };
+
+        function findNodeWithText(root: Element, needle: string): HTMLElement | null {
+          const walker = document.createTreeWalker(
+            root,
+            NodeFilter.SHOW_ELEMENT,
+          );
+          let node = walker.nextNode() as HTMLElement | null;
+          while (node) {
+            const text = node.innerText || "";
+            if (text.includes(needle)) {
+              return node;
+            }
+            node = walker.nextNode() as HTMLElement | null;
+          }
+          return null;
+        }
       },
       {
         containerSelector: SELECTORS.threadBottom,
         name: fileName,
       },
-    )) as { nameFound: boolean; uploading: boolean; complete: boolean };
+    )) as {
+      nameFound: boolean;
+      uploading: boolean;
+      complete: boolean;
+      svgCount: number;
+      circleCount: number;
+      useCount: number;
+    };
+    lastState = state;
 
     if (state.nameFound && state.complete && !state.uploading) {
       logDebug(logger, `upload complete for ${fileName}`);
@@ -240,6 +323,13 @@ async function waitForUploadComplete(
     await sleep(500);
   }
 
+  if (lastState) {
+    logger?.(
+      `[attachments] upload confirmation timed out for ${fileName} (nameFound=${lastState.nameFound}, uploading=${lastState.uploading}, complete=${lastState.complete}, svgCount=${lastState.svgCount}, circleCount=${lastState.circleCount}, useCount=${lastState.useCount})`,
+    );
+  } else {
+    logger?.(`[attachments] upload confirmation timed out for ${fileName}`);
+  }
   throw new Error(
     `Upload confirmation not detected for ${fileName} within ${timeoutMs}ms`,
   );
@@ -276,11 +366,15 @@ async function resolveExistingInputSelector(
   logger?: (message: string) => void,
 ): Promise<string | null> {
   const primaryCount = await page.locator(SELECTORS.fileInputPrimary).count();
+  const secondaryCount = await page.locator(SELECTORS.fileInputSecondary).count();
+  logDebug(
+    logger,
+    `file input counts primary=${primaryCount} secondary=${secondaryCount}`,
+  );
   if (primaryCount > 0) {
     logDebug(logger, "file input present (primary)");
     return SELECTORS.fileInputPrimary;
   }
-  const secondaryCount = await page.locator(SELECTORS.fileInputSecondary).count();
   if (secondaryCount > 0) {
     logDebug(logger, "file input present (secondary)");
     return SELECTORS.fileInputSecondary;
@@ -356,6 +450,11 @@ function resolveUploadStrategy(): UploadStrategy {
   if (normalized === "menu-input") return "menu-input";
   if (normalized === "filechooser") return "filechooser";
   return "menu-input";
+}
+
+function buildUploadStrategyOrder(primary: UploadStrategy): UploadStrategy[] {
+  const all: UploadStrategy[] = ["menu-input", "direct", "filechooser"];
+  return [primary, ...all.filter((entry) => entry !== primary)];
 }
 
 async function assertNoNativeDialogOpen(

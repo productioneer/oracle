@@ -62,6 +62,7 @@ const SELECTORS = {
   thinkingMenuItem: '[role="menuitemradio"]',
   sourcesHeader: '[data-testid="bar-search-sources-header"]',
   sidebarClose: '[data-testid="close-button"]',
+  threadBottom: "#thread-bottom-container",
 };
 
 const MIN_VIEWPORT_WIDTH = 1024;
@@ -124,9 +125,15 @@ export async function ensureChatGptReady(
   logger?: (message: string) => void,
 ): Promise<ChatGptState> {
   const needsCloudflare = await detectCloudflare(page);
-  const hasModelSwitcher = await selectorExists(page, SELECTOR_PAIRS.modelSwitcher, logger);
+  const hasModelSwitcher = await selectorExists(
+    page,
+    SELECTOR_PAIRS.modelSwitcher,
+    logger,
+    { timeoutMs: 15_000 },
+  );
   const hasNewChat = await selectorExists(page, SELECTOR_PAIRS.newChat, logger, {
     requireText: "new chat",
+    timeoutMs: 15_000,
   });
 
   if (hasModelSwitcher && hasNewChat) {
@@ -327,7 +334,7 @@ export async function submitPrompt(
     logDebug(logger, `typing prompt attempt ${attempt + 1}`);
     await clearInput();
     await input.click();
-    await page.keyboard.insertText(preparedPrompt);
+    await page.keyboard.type(preparedPrompt, { delay: 30 });
     await sleep(50);
     typedValue = await readInputValue();
     typedNormalized = normalizeTextForCompare(typedValue);
@@ -347,6 +354,61 @@ export async function submitPrompt(
   logDebug(logger, "prompt typed successfully; clicking send");
   await clickSendButton(page, logger);
   return typedValue;
+}
+
+export async function readPromptInputValue(
+  page: Page,
+  logger?: (message: string) => void,
+): Promise<{ value: string; found: boolean }> {
+  const resolved = await resolveSelectorPair(page, SELECTOR_PAIRS.promptInput, logger);
+  if (!resolved.selector) {
+    logDebug(logger, "prompt input selector not found for read");
+    return { value: "", found: false };
+  }
+  logDebug(
+    logger,
+    `prompt input resolve -> ${resolved.selector} (primaryCount=${resolved.primaryCount}, secondaryCount=${resolved.secondaryCount})`,
+  );
+  const value = await page
+    .evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return "";
+      if (el instanceof HTMLTextAreaElement) return el.value;
+      return (el as HTMLElement).innerText || "";
+    }, resolved.selector)
+    .catch(() => "");
+  return { value, found: true };
+}
+
+export async function getSendButtonState(
+  page: Page,
+  logger?: (message: string) => void,
+): Promise<{ found: boolean; enabled: boolean }> {
+  const resolved = await resolveSelectorPair(page, SELECTOR_PAIRS.sendButton, logger);
+  if (!resolved.selector) {
+    logDebug(logger, "send button selector not found");
+    return { found: false, enabled: false };
+  }
+  logDebug(
+    logger,
+    `send button resolve -> ${resolved.selector} (primaryCount=${resolved.primaryCount}, secondaryCount=${resolved.secondaryCount})`,
+  );
+  const result = await page
+    .evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return { found: false, enabled: false };
+      if (el instanceof HTMLButtonElement) {
+        return { found: true, enabled: !el.disabled };
+      }
+      const ariaDisabled = el.getAttribute("aria-disabled");
+      return { found: true, enabled: ariaDisabled !== "true" };
+    }, resolved.selector)
+    .catch(() => ({ found: false, enabled: false }));
+  logDebug(
+    logger,
+    `send button state found=${result.found} enabled=${result.enabled}`,
+  );
+  return result;
 }
 
 export async function getNextUserTurnNumber(page: Page): Promise<number> {
@@ -373,35 +435,45 @@ export async function waitForUserMessage(
   expectedTurn: number,
   timeoutMs = 10_000,
   logger?: (message: string) => void,
+  options: { normalizedCandidates?: string[] } = {},
 ): Promise<boolean> {
   const selector = `[data-testid="conversation-turn-${expectedTurn}"]`;
-  const expected = normalizeTextForCompare(prompt);
+  const expectedCandidates =
+    options.normalizedCandidates && options.normalizedCandidates.length > 0
+      ? options.normalizedCandidates
+      : [normalizeTextForCompare(prompt)];
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const result = await page.evaluate(
       ({
         selector,
         userSelector,
-        expectedNormalized,
+        expectedList,
       }: {
         selector: string;
         userSelector: string;
-        expectedNormalized: string;
+        expectedList: string[];
       }) => {
         const container = document.querySelector(selector);
         if (container) {
           const user = container.querySelector(userSelector) as HTMLElement | null;
           const text = user ? (user.innerText || "") : "";
-          return { matched: normalizeText(text) === expectedNormalized, fallback: false };
-        }
-        const users = Array.from(document.querySelectorAll(userSelector)) as HTMLElement[];
-        for (const user of users) {
-          const text = user.innerText || "";
-          if (normalizeText(text) === expectedNormalized) {
-            return { matched: true, fallback: true };
+          const normalized = normalizeText(text);
+          const matches = expectedList.some((expected) => {
+            if (!expected) return false;
+            if (normalized === expected) return true;
+            if (expected.length > 200) {
+              const prefix = expected.slice(0, 200);
+              return normalized.startsWith(prefix);
+            }
+            return false;
+          });
+          if (matches) {
+            return { matched: true, partial: false };
           }
+          return { matched: false, partial: false };
         }
-        return { matched: false, fallback: false };
+        return { matched: false, partial: false };
 
         function normalizeText(value: string): string {
           return value
@@ -415,13 +487,13 @@ export async function waitForUserMessage(
       {
         selector,
         userSelector: SELECTORS.userMessage,
-        expectedNormalized: expected,
+        expectedList: expectedCandidates,
       },
     );
     if (result.matched) {
-      if (result.fallback) {
+      if (result.partial) {
         logger?.(
-          `[chatgpt] user message matched via fallback; expected turn ${expectedTurn}`,
+          `[chatgpt] user message matched via prefix (expectedTurn=${expectedTurn}, prefixLen=200)`,
         );
       }
       return true;
@@ -455,6 +527,16 @@ export async function waitForThinkingPanel(
   logger?: (message: string) => void,
 ): Promise<boolean> {
   try {
+    const innerWidth = await page
+      .evaluate(() => window.innerWidth)
+      .catch(() => null);
+    if (typeof innerWidth === "number" && innerWidth < MIN_VIEWPORT_WIDTH) {
+      logDebug(
+        logger,
+        `viewport too narrow (${innerWidth}px); resizing to >=${MIN_VIEWPORT_WIDTH}px`,
+      );
+    }
+    await ensureWideViewport(page);
     try {
       await page.waitForSelector("text=Pro thinking", {
         timeout: THINKING_PANEL_INITIAL_WAIT_MS,
@@ -473,6 +555,7 @@ export async function waitForThinkingPanel(
       const clicked = await clickLatestThoughtHeader(page);
       logDebug(logger, `thinking header click attempt ${attempt + 1}: ${clicked}`);
       if (!clicked) break;
+      await ensureWideViewport(page);
       await sleep(THINKING_PANEL_RETRY_WAIT_MS);
       if (await hasProThinking(page)) {
         logDebug(logger, "thinking panel visible after header click");
@@ -538,6 +621,7 @@ export async function waitForCompletion(
     timeoutMs: number;
     pollMs: number;
     prompt?: string;
+    expectedAssistantTurn?: number;
     logger?: (message: string) => void;
   },
 ): Promise<WaitForCompletionResult> {
@@ -545,17 +629,41 @@ export async function waitForCompletion(
   let lastText = "";
   let lastIndex = -1;
   let lastChangeAt = Date.now();
-  let sawAssistant = false;
   let sawGenerating = false;
   let lastCopyVisible = false;
   let lastGenerating = false;
+  let loggedEmptyAssistant = false;
+  let lastHeartbeatLog = 0;
+  const heartbeatMs = 30_000;
+  let generationEndedAt: number | null = null;
 
   const basePollMs = Number.isFinite(options.pollMs) ? options.pollMs : 1000;
   const pollMs = Math.max(500, Math.min(basePollMs, 1000));
+  if (pollMs !== basePollMs) {
+    logDebug(
+      options.logger,
+      `poll interval clamped (requested=${basePollMs}, using=${pollMs})`,
+    );
+  }
+
+  if (options.expectedAssistantTurn) {
+    logDebug(
+      options.logger,
+      `waiting for assistant turn ${options.expectedAssistantTurn}`,
+    );
+  }
 
   while (Date.now() - start < options.timeoutMs) {
-    const snapshot = await getCompletionSnapshot(page, options.logger);
+    const snapshot = await getCompletionSnapshot(
+      page,
+      options.logger,
+      options.expectedAssistantTurn,
+    );
     if (snapshot.innerWidth > 0 && snapshot.innerWidth < MIN_VIEWPORT_WIDTH) {
+      logDebug(
+        options.logger,
+        `viewport too narrow (${snapshot.innerWidth}px); resizing to >=${MIN_VIEWPORT_WIDTH}px`,
+      );
       await ensureWideViewport(page);
     }
 
@@ -567,7 +675,6 @@ export async function waitForCompletion(
         lastText = snapshot.lastAssistantText;
         lastIndex = snapshot.lastAssistantIndex;
         lastChangeAt = Date.now();
-        sawAssistant = true;
         logDebug(
           options.logger,
           `response update (index=${lastIndex}, len=${lastText.length})`,
@@ -577,6 +684,9 @@ export async function waitForCompletion(
 
     if (snapshot.generating) {
       sawGenerating = true;
+      generationEndedAt = null;
+    } else if (sawGenerating && generationEndedAt === null) {
+      generationEndedAt = Date.now();
     }
     if (snapshot.copyVisible !== lastCopyVisible || snapshot.generating !== lastGenerating) {
       logDebug(
@@ -586,24 +696,58 @@ export async function waitForCompletion(
       lastCopyVisible = snapshot.copyVisible;
       lastGenerating = snapshot.generating;
     }
+    if (
+      snapshot.copyVisible &&
+      !snapshot.lastAssistantText &&
+      !loggedEmptyAssistant
+    ) {
+      logDebug(
+        options.logger,
+        `response copy visible but assistant text empty (assistantCount=${snapshot.assistantCount}, innerTextLen=${snapshot.innerTextLength}, visible=${snapshot.lastAssistantVisible})`,
+      );
+      loggedEmptyAssistant = true;
+    }
+    if (options.expectedAssistantTurn && !snapshot.expectedTurnFound) {
+      await scrollLatestAssistantIntoView(page, options.logger);
+    } else if (snapshot.assistantCount === 0) {
+      await scrollLatestAssistantIntoView(page, options.logger);
+    } else if (snapshot.copyVisible && !snapshot.lastAssistantText) {
+      await scrollLatestAssistantIntoView(page, options.logger);
+    }
+    if (Date.now() - lastHeartbeatLog > heartbeatMs) {
+      logDebug(
+        options.logger,
+        `waiting response (assistantCount=${snapshot.assistantCount}, generating=${snapshot.generating}, copyVisible=${snapshot.copyVisible}, expectedTurnFound=${snapshot.expectedTurnFound}, expectedAssistantFound=${snapshot.expectedAssistantFound}, lastTextLen=${snapshot.lastAssistantText.length})`,
+      );
+      lastHeartbeatLog = Date.now();
+    }
 
     const stable = Date.now() - lastChangeAt >= RESPONSE_STABILITY_MS;
-    if (snapshot.copyVisible && lastText && stable) {
+    const content = snapshot.lastAssistantText || lastText;
+    if (snapshot.copyVisible && content && stable) {
       return {
-        content: snapshot.lastAssistantText || lastText,
+        content,
         assistantIndex: snapshot.lastAssistantIndex ?? lastIndex,
         conversationUrl: page.url(),
       };
     }
 
-    if (!snapshot.generating && !snapshot.copyVisible && sawAssistant) {
+    if (
+      generationEndedAt &&
+      Date.now() - generationEndedAt > 30_000 &&
+      !snapshot.copyVisible
+    ) {
       throw new ResponseFailedError("Response failed or canceled");
     }
 
     await sleep(pollMs);
   }
 
-  const snapshot = await getCompletionSnapshot(page, options.logger);
+  const snapshot = await getCompletionSnapshot(
+    page,
+    options.logger,
+    options.expectedAssistantTurn,
+  );
   if (snapshot.copyVisible && snapshot.lastAssistantText) {
     return {
       content: snapshot.lastAssistantText,
@@ -614,7 +758,7 @@ export async function waitForCompletion(
   if (snapshot.generating) {
     throw new ResponseStalledError("Response stalled with stop/update button visible");
   }
-  if (sawGenerating || sawAssistant) {
+  if (sawGenerating) {
     throw new ResponseFailedError("Response failed or canceled");
   }
   throw new ResponseTimeoutError("Timed out waiting for completion");
@@ -697,71 +841,168 @@ async function readThinkingSections(page: Page): Promise<string> {
 export async function ensureWideViewport(page: Page): Promise<void> {
   try {
     const current = page.viewportSize();
-    if (!current) return;
-    if (current.width < MIN_VIEWPORT_WIDTH) {
+    if (current && current.width >= MIN_VIEWPORT_WIDTH) return;
+    if (current && current.width < MIN_VIEWPORT_WIDTH) {
       await page.setViewportSize(WIDE_VIEWPORT);
+      return;
     }
+    const innerWidth = await page
+      .evaluate(() => window.innerWidth)
+      .catch(() => null);
+    if (typeof innerWidth === "number" && innerWidth >= MIN_VIEWPORT_WIDTH) {
+      return;
+    }
+    await page.setViewportSize(WIDE_VIEWPORT);
   } catch {
     // ignore
+  }
+}
+
+async function scrollLatestAssistantIntoView(
+  page: Page,
+  logger?: (message: string) => void,
+): Promise<void> {
+  try {
+    const result = await page.evaluate((selectors) => {
+      const nodes = Array.from(
+        document.querySelectorAll(selectors.assistantMessage),
+      ) as HTMLElement[];
+      if (nodes.length > 0) {
+        const last = nodes[nodes.length - 1];
+        last.scrollIntoView({ block: "end", behavior: "auto" });
+        return { scrolled: "assistant", count: nodes.length };
+      }
+      const anchor = document.querySelector(selectors.threadBottom) as HTMLElement | null;
+      if (anchor) {
+        anchor.scrollIntoView({ block: "end", behavior: "auto" });
+        return { scrolled: "thread-bottom", count: 0 };
+      }
+      return { scrolled: "none", count: 0 };
+    }, SELECTORS);
+    if (result.scrolled !== "none") {
+      logDebug(
+        logger,
+        `scroll to ${result.scrolled} (assistantCount=${result.count})`,
+      );
+    }
+  } catch (error) {
+    logger?.(`[chatgpt] scroll latest assistant failed: ${String(error)}`);
   }
 }
 
 async function getCompletionSnapshot(
   page: Page,
   logger?: (message: string) => void,
+  expectedAssistantTurn?: number,
 ): Promise<{
   copyVisible: boolean;
+  expectedTurnFound: boolean;
+  expectedAssistantFound: boolean;
   generating: boolean;
   lastAssistantText: string;
   lastAssistantIndex: number;
+  assistantCount: number;
+  lastAssistantVisible: boolean;
+  innerTextLength: number;
   innerWidth: number;
 }> {
-  const snapshot = await page.evaluate((selectors) => {
-    const copyPrimary = document.querySelector(selectors.copyButtonPrimary);
-    const copySecondary = document.querySelector(selectors.copyButtonSecondary);
-    const copyElement = copyPrimary || copySecondary;
-    const copyVisible = copyElement ? isVisible(copyElement as HTMLElement) : false;
-    const copyMismatch = Boolean(
-      copyPrimary && copySecondary && copyPrimary !== copySecondary,
-    );
+  const snapshot = await page.evaluate(
+    ({ selectors, expectedTurn }) => {
+      const buttons = Array.from(document.querySelectorAll("button")) as HTMLButtonElement[];
+      const generating = buttons.some((button) => {
+        if (!isVisible(button)) return false;
+        const label =
+          button.innerText ||
+          button.textContent ||
+          button.getAttribute("aria-label") ||
+          button.getAttribute("title") ||
+          button.getAttribute("data-testid") ||
+          "";
+        const text = label.toLowerCase();
+        return text.includes("stop") || text.includes("update");
+      });
 
-    const buttons = Array.from(document.querySelectorAll("button")) as HTMLButtonElement[];
-    const generating = buttons.some((button) => {
-      if (!isVisible(button)) return false;
-      const text = (button.innerText || "").toLowerCase();
-      return text.includes("stop") || text.includes("update");
-    });
-
-    const nodes = Array.from(document.querySelectorAll(selectors.assistantMessage)) as HTMLElement[];
-    const last = nodes[nodes.length - 1];
-    return {
-      copyVisible,
-      copyMismatch,
-      copyPrimaryFound: Boolean(copyPrimary),
-      copySecondaryFound: Boolean(copySecondary),
-      generating,
-      lastAssistantText: last?.innerText ?? "",
-      lastAssistantIndex: nodes.length ? nodes.length - 1 : -1,
-      innerWidth: window.innerWidth,
-    };
-
-    function isVisible(el: HTMLElement): boolean {
-      const style = window.getComputedStyle(el);
-      return (
-        style.display !== "none" &&
-        style.visibility !== "hidden" &&
-        style.opacity !== "0"
+      const nodes = Array.from(
+        document.querySelectorAll(selectors.assistantMessage),
+      ) as HTMLElement[];
+      const last = nodes[nodes.length - 1] ?? null;
+      let expectedTurnFound = false;
+      let expectedAssistantFound = false;
+      let expectedContainer: HTMLElement | null = null;
+      let expectedAssistant: HTMLElement | null = null;
+      if (typeof expectedTurn === "number") {
+        const expectedSelector = `[data-testid="conversation-turn-${expectedTurn}"]`;
+        expectedContainer = document.querySelector(expectedSelector) as HTMLElement | null;
+        expectedTurnFound = Boolean(expectedContainer);
+        expectedAssistant = expectedContainer
+          ? (expectedContainer.querySelector(selectors.assistantMessage) as HTMLElement | null)
+          : null;
+        expectedAssistantFound = Boolean(expectedAssistant);
+      }
+      const targetAssistant =
+        typeof expectedTurn === "number" ? expectedAssistant : last;
+      const lastVisible = targetAssistant ? isVisible(targetAssistant) : false;
+      const innerText = targetAssistant?.innerText ?? "";
+      const targetTurn = targetAssistant
+        ? (targetAssistant.closest('[data-testid^="conversation-turn-"]') as HTMLElement | null)
+        : null;
+      const copyScope =
+        typeof expectedTurn === "number" ? expectedContainer : targetTurn;
+      const copyPrimary = copyScope
+        ? (Array.from(copyScope.querySelectorAll(selectors.copyButtonPrimary)) as HTMLElement[])
+        : [];
+      const copySecondary = copyScope
+        ? (Array.from(copyScope.querySelectorAll(selectors.copyButtonSecondary)) as HTMLElement[])
+        : [];
+      const copyElements = [...copyPrimary, ...copySecondary];
+      const copyElement = copyElements[0] ?? null;
+      const copyVisible = copyElement ? isVisible(copyElement) : false;
+      const copyMismatch = Boolean(
+        copyPrimary.length > 0 &&
+          copySecondary.length > 0 &&
+          copyPrimary[0] !== copySecondary[0],
       );
-    }
-  }, SELECTORS);
+
+      return {
+        copyVisible,
+        copyMismatch,
+        copyPrimaryFound: copyPrimary.length > 0,
+        copySecondaryFound: copySecondary.length > 0,
+        generating,
+        lastAssistantText: innerText,
+        lastAssistantIndex: targetAssistant ? nodes.indexOf(targetAssistant) : -1,
+        assistantCount: nodes.length,
+        lastAssistantVisible: lastVisible,
+        innerTextLength: innerText.length,
+        expectedTurnFound,
+        expectedAssistantFound,
+        innerWidth: window.innerWidth,
+      };
+
+      function isVisible(el: HTMLElement): boolean {
+        const style = window.getComputedStyle(el);
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          style.opacity !== "0"
+        );
+      }
+    },
+    { selectors: SELECTORS, expectedTurn: expectedAssistantTurn ?? null },
+  );
 
   maybeLogMismatch("copyButton", snapshot, logger);
 
   return {
     copyVisible: snapshot.copyVisible,
+    expectedTurnFound: snapshot.expectedTurnFound,
+    expectedAssistantFound: snapshot.expectedAssistantFound,
     generating: snapshot.generating,
     lastAssistantText: snapshot.lastAssistantText,
     lastAssistantIndex: snapshot.lastAssistantIndex,
+    assistantCount: snapshot.assistantCount,
+    lastAssistantVisible: snapshot.lastAssistantVisible,
+    innerTextLength: snapshot.innerTextLength,
     innerWidth: snapshot.innerWidth,
   };
 }
@@ -796,8 +1037,19 @@ async function selectorExists(
   page: Page,
   pair: SelectorPair,
   logger?: (message: string) => void,
-  options: { requireText?: string } = {},
+  options: { requireText?: string; timeoutMs?: number } = {},
 ): Promise<boolean> {
+  const combined = pair.secondary ? `${pair.primary}, ${pair.secondary}` : pair.primary;
+  if (options.timeoutMs) {
+    try {
+      await page.waitForSelector(combined, {
+        timeout: options.timeoutMs,
+        state: "attached",
+      });
+    } catch {
+      // fall through to evaluation
+    }
+  }
   const resolved = (await page.evaluate(
     ({
       primary,
@@ -808,32 +1060,39 @@ async function selectorExists(
       secondary: string | null;
       text: string;
     }) => {
-      const primaryEl = document.querySelector(primary);
-      const secondaryEl = secondary ? document.querySelector(secondary) : null;
-      const secondaryMatch = secondaryEl
-        ? text
-          ? (secondaryEl.textContent || "").toLowerCase().includes(text)
-          : true
-        : false;
+      const primaryEls = Array.from(document.querySelectorAll(primary));
+      const secondaryEls = secondary
+        ? Array.from(document.querySelectorAll(secondary))
+        : [];
+      const needle = text.toLowerCase();
+      const matchesText = (el: Element) =>
+        !needle || (el.textContent || "").toLowerCase().includes(needle);
+      const primaryMatch = primaryEls.find((el) => matchesText(el)) ?? null;
+      const secondaryMatch = secondaryEls.find((el) => matchesText(el)) ?? null;
+      const found = Boolean(primaryMatch || secondaryMatch);
       const mismatch =
-        primaryEl && secondaryEl && primaryEl !== secondaryEl && secondaryMatch;
+        primaryMatch && secondaryMatch && primaryMatch !== secondaryMatch;
       return {
-        found: Boolean(primaryEl || (secondaryEl && secondaryMatch)),
+        found,
         mismatch,
-        primaryFound: Boolean(primaryEl),
-        secondaryFound: Boolean(secondaryEl && secondaryMatch),
+        primaryCount: primaryEls.length,
+        secondaryCount: secondaryEls.length,
+        primaryMatched: Boolean(primaryMatch),
+        secondaryMatched: Boolean(secondaryMatch),
       };
     },
     {
       primary: pair.primary,
       secondary: pair.secondary ?? null,
-      text: options.requireText ? options.requireText.toLowerCase() : "",
+      text: options.requireText ?? "",
     },
   )) as {
     found: boolean;
     mismatch: boolean;
-    primaryFound: boolean;
-    secondaryFound: boolean;
+    primaryCount: number;
+    secondaryCount: number;
+    primaryMatched: boolean;
+    secondaryMatched: boolean;
   };
 
   if (resolved.mismatch) {
@@ -842,7 +1101,7 @@ async function selectorExists(
 
   logDebug(
     logger,
-    `selectorExists ${pair.name} found=${resolved.found} primaryCount=${resolved.primaryFound ? "1+" : "0"} secondaryCount=${resolved.secondaryFound ? "1+" : "0"}`,
+    `selectorExists ${pair.name} found=${resolved.found} primaryCount=${resolved.primaryCount} secondaryCount=${resolved.secondaryCount} primaryMatched=${resolved.primaryMatched} secondaryMatched=${resolved.secondaryMatched}`,
   );
   return resolved.found;
 }

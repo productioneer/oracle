@@ -81,7 +81,9 @@ export async function readThinkingContent(config: RunConfig): Promise<string> {
               await firefoxServer.close().catch(() => null);
             }
           } else {
-            await disconnectBrowser(browser);
+            await disconnectBrowser(browser, {
+              allowClose: config.browser !== "chrome",
+            });
           }
         } catch {
           // ignore
@@ -166,11 +168,13 @@ function isLocalUrl(url: string): boolean {
 
 async function disconnectBrowser(
   browser: import("playwright").Browser,
+  options: { allowClose?: boolean } = {},
 ): Promise<void> {
   const maybeDisconnect = (browser as any).disconnect;
   if (typeof maybeDisconnect === "function") {
     await maybeDisconnect.call(browser);
-  } else {
-    await browser.close();
+    return;
   }
+  if (options.allowClose === false) return;
+  await browser.close();
 }
