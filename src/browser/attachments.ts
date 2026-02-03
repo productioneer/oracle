@@ -5,14 +5,25 @@ import { sleep } from "../utils/time.js";
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
 
+// ChatGPT silently ignores files beyond this per-message limit.
+// setInputFiles() succeeds but the UI never registers the file.
+const DEFAULT_MAX_UPLOAD_ATTACHMENTS = 10;
+
+function getMaxUploadAttachments(): number {
+  const raw = process.env.ORACLE_MAX_UPLOAD_ATTACHMENTS;
+  if (!raw) return DEFAULT_MAX_UPLOAD_ATTACHMENTS;
+  const n = parseInt(raw.trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_UPLOAD_ATTACHMENTS;
+}
+
 const SELECTORS = {
   composerPlusPrimary: '[data-testid="composer-plus-btn"]',
   composerPlusSecondary: 'button[aria-label*="Add files"]',
   fileInputPrimary: 'div.pointer-events-auto input[type="file"]',
   fileInputSecondary: 'input[type="file"]',
   removeFileButton: 'button[aria-label="Remove file"]',
-  threadBottom: '#thread-bottom-container',
-  uploadMenuText: 'Add photos &',
+  threadBottom: "#thread-bottom-container",
+  uploadMenuText: "Add photos &",
 };
 
 type UploadStrategy = "menu-input" | "direct" | "filechooser";
@@ -49,15 +60,31 @@ const loggedSelectorMismatches = new Set<string>();
 
 /**
  * Upload attachments to ChatGPT before submitting the prompt.
+ * Returns any overflow attachments that couldn't be uploaded due to
+ * ChatGPT's per-message file limit. Caller should inline these into
+ * the prompt text.
  */
 export async function uploadAttachments(
   page: Page,
   attachments: Attachment[],
   logger?: (message: string) => void,
-): Promise<void> {
-  for (const attachment of attachments) {
+): Promise<Attachment[]> {
+  const max = getMaxUploadAttachments();
+  const toUpload = attachments.slice(0, max);
+  const overflow = attachments.slice(max);
+
+  if (overflow.length > 0) {
+    logDebug(
+      logger,
+      `ChatGPT file limit (${max}): uploading ${toUpload.length}, will inline ${overflow.length}`,
+    );
+  }
+
+  for (const attachment of toUpload) {
     await uploadSingleAttachment(page, attachment, logger);
   }
+
+  return overflow;
 }
 
 async function uploadSingleAttachment(
@@ -77,7 +104,10 @@ async function uploadSingleAttachment(
 
   const strategy = resolveUploadStrategy();
   const strategyOrder = buildUploadStrategyOrder(strategy);
-  logDebug(logger, `upload strategy=${strategy} order=${strategyOrder.join(",")}`);
+  logDebug(
+    logger,
+    `upload strategy=${strategy} order=${strategyOrder.join(",")}`,
+  );
   let lastError: unknown;
   for (const attempt of strategyOrder) {
     try {
@@ -89,7 +119,12 @@ async function uploadSingleAttachment(
       } else {
         await uploadViaMenuInput(page, attachment, logger);
       }
-      await waitForRemoveButton(page, removeCount, attachment.displayName, logger);
+      await waitForRemoveButton(
+        page,
+        removeCount,
+        attachment.displayName,
+        logger,
+      );
       await waitForUploadComplete(page, attachment.displayName, logger);
       await assertNoNativeDialogOpen(logger);
       return;
@@ -136,7 +171,10 @@ async function uploadViaMenuInput(
   const directSelector = await resolveExistingInputSelector(page, logger);
   if (directSelector) {
     await page.locator(directSelector).setInputFiles(attachment.path);
-    logDebug(logger, `setInputFiles (menu direct) for ${attachment.displayName}`);
+    logDebug(
+      logger,
+      `setInputFiles (menu direct) for ${attachment.displayName}`,
+    );
     return;
   }
   await page
@@ -229,16 +267,14 @@ async function waitForUploadComplete(
   timeoutMs = 30_000,
 ): Promise<void> {
   const start = Date.now();
-  let lastState:
-    | {
-        nameFound: boolean;
-        uploading: boolean;
-        complete: boolean;
-        svgCount: number;
-        circleCount: number;
-        useCount: number;
-      }
-    | null = null;
+  let lastState: {
+    nameFound: boolean;
+    uploading: boolean;
+    complete: boolean;
+    svgCount: number;
+    circleCount: number;
+    useCount: number;
+  } | null = null;
   while (Date.now() - start < timeoutMs) {
     const state = (await page.evaluate(
       ({ containerSelector, name }) => {
@@ -257,7 +293,9 @@ async function waitForUploadComplete(
         const nameFound = text.includes(name);
         const nodeContainingName = findNodeWithText(container, name);
         const scope = nodeContainingName ?? container;
-        const svgs = Array.from(scope.querySelectorAll("svg")) as SVGSVGElement[];
+        const svgs = Array.from(
+          scope.querySelectorAll("svg"),
+        ) as SVGSVGElement[];
         let hasCircle = false;
         let hasUse = false;
         let circleCount = 0;
@@ -286,7 +324,10 @@ async function waitForUploadComplete(
           useCount,
         };
 
-        function findNodeWithText(root: Element, needle: string): HTMLElement | null {
+        function findNodeWithText(
+          root: Element,
+          needle: string,
+        ): HTMLElement | null {
           const walker = document.createTreeWalker(
             root,
             NodeFilter.SHOW_ELEMENT,
@@ -341,7 +382,9 @@ async function waitForSelectorPair(
   logger?: (message: string) => void,
   options: { timeoutMs?: number; state?: "attached" | "visible" } = {},
 ): Promise<string> {
-  const combined = pair.secondary ? `${pair.primary}, ${pair.secondary}` : pair.primary;
+  const combined = pair.secondary
+    ? `${pair.primary}, ${pair.secondary}`
+    : pair.primary;
   logDebug(
     logger,
     `waitForSelectorPair ${pair.name} combined="${combined}" state=${options.state ?? "attached"}`,
@@ -366,7 +409,9 @@ async function resolveExistingInputSelector(
   logger?: (message: string) => void,
 ): Promise<string | null> {
   const primaryCount = await page.locator(SELECTORS.fileInputPrimary).count();
-  const secondaryCount = await page.locator(SELECTORS.fileInputSecondary).count();
+  const secondaryCount = await page
+    .locator(SELECTORS.fileInputSecondary)
+    .count();
   logDebug(
     logger,
     `file input counts primary=${primaryCount} secondary=${secondaryCount}`,
@@ -388,13 +433,7 @@ async function resolveSelectorPair(
   logger?: (message: string) => void,
 ): Promise<SelectorMatch> {
   const resolved = (await page.evaluate(
-    ({
-      primary,
-      secondary,
-    }: {
-      primary: string;
-      secondary: string | null;
-    }) => {
+    ({ primary, secondary }: { primary: string; secondary: string | null }) => {
       const primaryEls = Array.from(document.querySelectorAll(primary));
       const secondaryEls = secondary
         ? Array.from(document.querySelectorAll(secondary))
@@ -499,10 +538,10 @@ async function getChromeDialogCounts(
     "repeat with w in windows",
     "set sheetTotal to sheetTotal + (count of sheets of w)",
     "try",
-    "if subrole of w is \"AXDialog\" then set dialogTotal to dialogTotal + 1",
+    'if subrole of w is "AXDialog" then set dialogTotal to dialogTotal + 1',
     "end try",
     "end repeat",
-    "return (sheetTotal as string) & \",\" & (dialogTotal as string)",
+    'return (sheetTotal as string) & "," & (dialogTotal as string)',
     "end tell",
     "end tell",
   ].join("\n");
@@ -538,16 +577,16 @@ async function dismissNativeDialogs(
     "repeat with w in windows",
     "repeat with s in sheets of w",
     "try",
-    "if exists (button \"Cancel\" of s) then",
-    "click button \"Cancel\" of s",
+    'if exists (button "Cancel" of s) then',
+    'click button "Cancel" of s',
     "set closedCount to closedCount + 1",
     "end if",
     "end try",
     "end repeat",
     "try",
-    "if subrole of w is \"AXDialog\" then",
-    "if exists (button \"Cancel\" of w) then",
-    "click button \"Cancel\" of w",
+    'if subrole of w is "AXDialog" then',
+    'if exists (button "Cancel" of w) then',
+    'click button "Cancel" of w',
     "set closedCount to closedCount + 1",
     "end if",
     "end if",

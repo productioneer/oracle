@@ -105,8 +105,7 @@ export function parsePromptAttachments(
   // Match @path or @"quoted path" patterns, optionally followed by :linespec
   // Unquoted: @followed by non-whitespace until whitespace or end
   // Quoted: @"..." or @'...'
-  const pattern =
-    /@(?:"([^"]+)"|'([^']+)'|(\S+))(?:\:(\d+)(?:-(\d+))?)?/g;
+  const pattern = /@(?:"([^"]+)"|'([^']+)'|(\S+))(?:\:(\d+)(?:-(\d+))?)?/g;
 
   const replaced = prompt.replace(
     pattern,
@@ -136,7 +135,9 @@ export function parsePromptAttachments(
 
       // Check file exists
       if (!existsSync(resolved)) {
-        throw new Error(`File not found: ${filePath} (resolved to ${resolved})`);
+        throw new Error(
+          `File not found: ${filePath} (resolved to ${resolved})`,
+        );
       }
 
       // Check it's a file, not a directory
@@ -180,7 +181,10 @@ export function parsePromptAttachments(
   };
 }
 
-function splitTrailingPunctuation(ref: string): { ref: string; trailing: string } {
+function splitTrailingPunctuation(ref: string): {
+  ref: string;
+  trailing: string;
+} {
   const match = ref.match(/^(.*?)([),.;!?:\]}]+)$/);
   if (!match) return { ref, trailing: "" };
   return { ref: match[1], trailing: match[2] };
@@ -203,9 +207,7 @@ function looksLikeFileRef(
 
   if (!/^[A-Za-z0-9._~\\/:-]+$/.test(sanitized)) return false;
 
-  const isExplicitPrefix = /^(~|\/|\.\/|\.\.\/|[A-Za-z]:[\\/])/.test(
-    sanitized,
-  );
+  const isExplicitPrefix = /^(~|\/|\.\/|\.\.\/|[A-Za-z]:[\\/])/.test(sanitized);
   if (isExplicitPrefix) return true;
 
   const parts = sanitized.split(/[\\/]/);
@@ -288,4 +290,67 @@ function resolvePath(filePath: string, cwd: string): string {
     return filePath;
   }
   return path.resolve(cwd, filePath);
+}
+
+const BINARY_EXTENSIONS = new Set([
+  "pdf",
+  "doc",
+  "docx",
+  "xls",
+  "xlsx",
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "svg",
+  "webp",
+  "zip",
+  "tar",
+  "gz",
+]);
+
+const MAX_INLINE_BYTES = 100_000; // 100KB
+
+/**
+ * Replace [attached: X] markers for overflow attachments with inline
+ * code blocks containing the full file content. Used when the number
+ * of attachments exceeds ChatGPT's per-message file limit.
+ *
+ * Binary files and files exceeding MAX_INLINE_BYTES are replaced with
+ * a note instead of inline content.
+ */
+export function inlineOverflowAttachments(
+  prompt: string,
+  overflow: Attachment[],
+): string {
+  let result = prompt;
+  for (const attachment of overflow) {
+    const marker = `[attached: ${attachment.displayName}]`;
+    const idx = result.indexOf(marker);
+    if (idx === -1) continue;
+
+    const ext = path.extname(attachment.displayName).slice(1).toLowerCase();
+
+    if (BINARY_EXTENSIONS.has(ext)) {
+      const note = `[${attachment.displayName}: binary file, not inlined]`;
+      result = result.slice(0, idx) + note + result.slice(idx + marker.length);
+      continue;
+    }
+
+    const stat = statSync(attachment.path);
+    if (stat.size > MAX_INLINE_BYTES) {
+      const sizeKB = Math.round(stat.size / 1000);
+      const note = `[${attachment.displayName}: ${sizeKB}KB, too large to inline]`;
+      result = result.slice(0, idx) + note + result.slice(idx + marker.length);
+      continue;
+    }
+
+    const content = readFileSync(attachment.path, "utf-8");
+    const lang = ext || "";
+    const codeBlock = `**${attachment.displayName}:**\n\`\`\`${lang}\n${content}\n\`\`\``;
+
+    result =
+      result.slice(0, idx) + codeBlock + result.slice(idx + marker.length);
+  }
+  return result;
 }

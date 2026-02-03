@@ -52,6 +52,7 @@ import {
   waitForThinkingPanel,
 } from "./browser/chatgpt.js";
 import { uploadAttachments } from "./browser/attachments.js";
+import { inlineOverflowAttachments } from "./run/attachments.js";
 import {
   saveResultJson,
   saveResultMarkdown,
@@ -111,7 +112,12 @@ async function main(): Promise<void> {
     );
 
     try {
-      const result = await runAttempt(config, logger, args.runDir, recoveryRetries);
+      const result = await runAttempt(
+        config,
+        logger,
+        args.runDir,
+        recoveryRetries,
+      );
       if (result === "needs_user") return;
       if (result === "retry") {
         recoveryRetries += 1;
@@ -338,14 +344,15 @@ async function runAttempt(
             return "needs_user";
           }
 
-        await writeStatus(config, "running", "navigate", "checking model");
-        try {
-          await ensureModelSelected(page, logger);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          await writeNeedsUser(config, "unknown", message, "navigate");
-          return "needs_user";
-        }
+          await writeStatus(config, "running", "navigate", "checking model");
+          try {
+            await ensureModelSelected(page, logger);
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            await writeNeedsUser(config, "unknown", message, "navigate");
+            return "needs_user";
+          }
         } else {
           logger("[dev] local mock detected; skipping session + model checks");
         }
@@ -370,7 +377,7 @@ async function runAttempt(
         }
 
         const promptNormalized = normalizeForCompare(config.prompt);
-        const promptMatchCandidates = buildPromptMatchCandidates(config.prompt);
+        let promptMatchCandidates = buildPromptMatchCandidates(config.prompt);
         const alreadySubmitted = await promptAlreadySubmitted(
           page,
           config.prompt,
@@ -417,10 +424,28 @@ async function runAttempt(
               `uploading ${config.attachments.length} file(s)`,
             );
             try {
-              await uploadAttachments(page, config.attachments, logger);
-              logger(
-                `[attachments] uploaded ${config.attachments.length} file(s)`,
+              const overflow = await uploadAttachments(
+                page,
+                config.attachments,
+                logger,
               );
+              const uploaded = config.attachments.length - overflow.length;
+              logger(
+                `[attachments] uploaded ${uploaded} file(s)` +
+                  (overflow.length > 0
+                    ? `, inlining ${overflow.length} file(s) due to upload limit`
+                    : ""),
+              );
+              if (overflow.length > 0) {
+                config.prompt = inlineOverflowAttachments(
+                  config.prompt,
+                  overflow,
+                );
+                // Recompute match candidates since prompt changed
+                promptMatchCandidates = buildPromptMatchCandidates(
+                  config.prompt,
+                );
+              }
               await waitForPromptInput(page, 10_000, logger);
             } catch (error) {
               const message =
@@ -516,7 +541,9 @@ async function runAttempt(
               }
             }
             if (!submitted) {
-              logger("[prompt] user message not detected; waiting before retry");
+              logger(
+                "[prompt] user message not detected; waiting before retry",
+              );
               await sleep(2000);
               const afterRetrySnapshot = await getUserMessageSnapshot(
                 page,
@@ -582,7 +609,9 @@ async function runAttempt(
             }
           }
           if (!submitted) {
-            throw new Error("User message not detected after prompt submission");
+            throw new Error(
+              "User message not detected after prompt submission",
+            );
           }
           await sleep(1000);
           await ensureConversationUrlAfterSubmit(page, config, logger, {
@@ -746,7 +775,8 @@ async function attemptRecovery(
   if (!browser || !page) return false;
 
   await writeStatus(config, "running", "recovery", "checking browser health");
-  const errorMessage = error instanceof Error ? error.message : String(error ?? "");
+  const errorMessage =
+    error instanceof Error ? error.message : String(error ?? "");
   if (errorMessage) {
     logger(`[recovery] error: ${errorMessage}`);
   }
@@ -765,7 +795,9 @@ async function attemptRecovery(
     `[recovery] debug=${debug.ok} runtime=${runtime.ok} page=${pageHealth.ok}`,
   );
   if (debug.ok && pageHealth.ok && !runtime.ok) {
-    logger("[recovery] runtime check failed but page is responsive; skipping restart");
+    logger(
+      "[recovery] runtime check failed but page is responsive; skipping restart",
+    );
     return false;
   }
   if (debug.ok) {
@@ -811,12 +843,7 @@ async function attemptRecovery(
     const reason = debug.ok
       ? "Personal Chrome unresponsive; approval required to restart"
       : "Personal Chrome debug endpoint unreachable; approval required to restart";
-    await writeNeedsUser(
-      config,
-      "chrome_restart_approval",
-      reason,
-      "recovery",
-    );
+    await writeNeedsUser(config, "chrome_restart_approval", reason, "recovery");
     approval = await waitForChromeRestartApproval({
       runId: config.runId,
       notifyTitle: "Approve personal Chrome restart",
@@ -836,7 +863,9 @@ async function attemptRecovery(
       throw new CancelError("Canceled by user");
     }
     if (approval.action === "done") {
-      logger("[recovery] personal chrome restart already completed by another run");
+      logger(
+        "[recovery] personal chrome restart already completed by another run",
+      );
       return true;
     }
   }
@@ -889,7 +918,10 @@ async function attemptRecovery(
         "Personal Chrome restart failed; allow-kill required to force quit",
         "recovery",
       );
-      throw new NeedsUserError("chrome_restart_approval", "Chrome restart failed");
+      throw new NeedsUserError(
+        "chrome_restart_approval",
+        "Chrome restart failed",
+      );
     }
     throw new Error("Chrome restart failed");
   }
@@ -943,7 +975,9 @@ async function shutdownChromePid(
     await sleep(250);
   }
   if (!forceKill) {
-    logger("[recovery] chrome pid still alive; skipping SIGKILL (ORACLE_FORCE_KILL=1 to enable)");
+    logger(
+      "[recovery] chrome pid still alive; skipping SIGKILL (ORACLE_FORCE_KILL=1 to enable)",
+    );
     return false;
   }
   logger(`[recovery] force killing chrome pid ${pid}`);
@@ -974,7 +1008,10 @@ async function requestChromeShutdown(
   }
 }
 
-async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
+async function waitForPidExit(
+  pid: number,
+  timeoutMs: number,
+): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (!isProcessAlive(pid)) return true;
@@ -1324,61 +1361,66 @@ async function getUserMessageSnapshot(
   lastTurnNumber: number | null;
   maxTurnNumber: number | null;
 }> {
-  return page.evaluate((args) => {
-    const nodes = Array.from(
-      document.querySelectorAll('[data-message-author-role="user"]'),
-    ) as HTMLElement[];
-    const turnNumbers = Array.from(
-      document.querySelectorAll('[data-testid^="conversation-turn-"]'),
-    )
-      .map((el) => {
-        const id = el.getAttribute("data-testid") || "";
+  return page.evaluate(
+    (args) => {
+      const nodes = Array.from(
+        document.querySelectorAll('[data-message-author-role="user"]'),
+      ) as HTMLElement[];
+      const turnNumbers = Array.from(
+        document.querySelectorAll('[data-testid^="conversation-turn-"]'),
+      )
+        .map((el) => {
+          const id = el.getAttribute("data-testid") || "";
+          const match = id.match(/conversation-turn-(\d+)/);
+          return match ? Number(match[1]) : NaN;
+        })
+        .filter((value) => Number.isFinite(value)) as number[];
+      const maxTurnNumber = turnNumbers.length
+        ? Math.max(...turnNumbers)
+        : null;
+      const count = nodes.length;
+      const lastText = count ? nodes[count - 1].innerText || "" : "";
+      const lastNormalized = normalizeText(lastText);
+      const lastMatchesPrompt = args.expectedCandidates.some(
+        (candidate: string) => matchesExpected(lastNormalized, candidate),
+      );
+      let lastTurnNumber: number | null = null;
+      if (count) {
+        const lastNode = nodes[count - 1];
+        const turn = lastNode.closest('[data-testid^="conversation-turn-"]');
+        const id = turn?.getAttribute("data-testid") || "";
         const match = id.match(/conversation-turn-(\d+)/);
-        return match ? Number(match[1]) : NaN;
-      })
-      .filter((value) => Number.isFinite(value)) as number[];
-    const maxTurnNumber = turnNumbers.length ? Math.max(...turnNumbers) : null;
-    const count = nodes.length;
-    const lastText = count ? nodes[count - 1].innerText || "" : "";
-    const lastNormalized = normalizeText(lastText);
-    const lastMatchesPrompt = args.expectedCandidates.some((candidate: string) =>
-      matchesExpected(lastNormalized, candidate),
-    );
-    let lastTurnNumber: number | null = null;
-    if (count) {
-      const lastNode = nodes[count - 1];
-      const turn = lastNode.closest('[data-testid^="conversation-turn-"]');
-      const id = turn?.getAttribute("data-testid") || "";
-      const match = id.match(/conversation-turn-(\d+)/);
-      if (match) lastTurnNumber = Number(match[1]);
-    }
-    return {
-      count,
-      lastNormalized,
-      lastMatchesPrompt,
-      lastTurnNumber,
-      maxTurnNumber,
-    };
-
-    function normalizeText(value: string): string {
-      return value
-        .replace(/\r\n/g, "\n")
-        .replace(/\u00a0/g, " ")
-        .replace(/\t/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-    }
-
-    function matchesExpected(value: string, expected: string): boolean {
-      if (!value) return false;
-      if (value === expected) return true;
-      if (expected.length > 200) {
-        const prefix = expected.slice(0, 200);
-        return value.startsWith(prefix);
+        if (match) lastTurnNumber = Number(match[1]);
       }
-      return false;
-    }
-  }, { expectedCandidates });
+      return {
+        count,
+        lastNormalized,
+        lastMatchesPrompt,
+        lastTurnNumber,
+        maxTurnNumber,
+      };
+
+      function normalizeText(value: string): string {
+        return value
+          .replace(/\r\n/g, "\n")
+          .replace(/\u00a0/g, " ")
+          .replace(/\t/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+      }
+
+      function matchesExpected(value: string, expected: string): boolean {
+        if (!value) return false;
+        if (value === expected) return true;
+        if (expected.length > 200) {
+          const prefix = expected.slice(0, 200);
+          return value.startsWith(prefix);
+        }
+        return false;
+      }
+    },
+    { expectedCandidates },
+  );
 }
 
 async function findUserTurnNumberForPrompt(
@@ -1388,49 +1430,49 @@ async function findUserTurnNumberForPrompt(
 ): Promise<number | null> {
   return page.evaluate(
     ({ candidates, minTurn }) => {
-    const turns = Array.from(
-      document.querySelectorAll('[data-testid^="conversation-turn-"]'),
-    ) as HTMLElement[];
-    let matched: number | null = null;
-    for (const turn of turns) {
-      const id = turn.getAttribute("data-testid") || "";
-      const match = id.match(/conversation-turn-(\d+)/);
-      if (!match) continue;
-      const turnNumber = Number(match[1]);
-      if (Number.isFinite(minTurn) && turnNumber <= (minTurn as number)) {
-        continue;
+      const turns = Array.from(
+        document.querySelectorAll('[data-testid^="conversation-turn-"]'),
+      ) as HTMLElement[];
+      let matched: number | null = null;
+      for (const turn of turns) {
+        const id = turn.getAttribute("data-testid") || "";
+        const match = id.match(/conversation-turn-(\d+)/);
+        if (!match) continue;
+        const turnNumber = Number(match[1]);
+        if (Number.isFinite(minTurn) && turnNumber <= (minTurn as number)) {
+          continue;
+        }
+        const user = turn.querySelector(
+          '[data-message-author-role="user"]',
+        ) as HTMLElement | null;
+        if (!user) continue;
+        const text = normalizeText(user.innerText || "");
+        const candidateMatch = candidates.some((candidate: string) =>
+          matchesExpected(text, candidate),
+        );
+        if (!candidateMatch) continue;
+        matched = turnNumber;
       }
-      const user = turn.querySelector(
-        '[data-message-author-role="user"]',
-      ) as HTMLElement | null;
-      if (!user) continue;
-      const text = normalizeText(user.innerText || "");
-      const candidateMatch = candidates.some((candidate: string) =>
-        matchesExpected(text, candidate),
-      );
-      if (!candidateMatch) continue;
-      matched = turnNumber;
-    }
-    return matched;
+      return matched;
 
-    function normalizeText(value: string): string {
-      return value
-        .replace(/\r\n/g, "\n")
-        .replace(/\u00a0/g, " ")
-        .replace(/\t/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-    }
-
-    function matchesExpected(value: string, expected: string): boolean {
-      if (!value) return false;
-      if (value === expected) return true;
-      if (expected.length > 200) {
-        const prefix = expected.slice(0, 200);
-        return value.startsWith(prefix);
+      function normalizeText(value: string): string {
+        return value
+          .replace(/\r\n/g, "\n")
+          .replace(/\u00a0/g, " ")
+          .replace(/\t/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
       }
-      return false;
-    }
+
+      function matchesExpected(value: string, expected: string): boolean {
+        if (!value) return false;
+        if (value === expected) return true;
+        if (expected.length > 200) {
+          const prefix = expected.slice(0, 200);
+          return value.startsWith(prefix);
+        }
+        return false;
+      }
     },
     { candidates: expectedCandidates, minTurn: minTurnNumber ?? null },
   );
@@ -1674,9 +1716,7 @@ async function disconnectBrowser(
     return;
   }
   if (options.allowClose === false) {
-    options.logger?.(
-      "[browser] disconnect unavailable; leaving browser open",
-    );
+    options.logger?.("[browser] disconnect unavailable; leaving browser open");
     return;
   }
   await browser.close();
