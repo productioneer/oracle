@@ -5,7 +5,6 @@ Browser-based tool for AI agents to query GPT via ChatGPT web interface.
 ## Authoritative Sources
 
 - **DNA (requirements)**: DNA.md (internal)
-- **Research (approaches)**: research notes (internal)
 - **Reference implementation**: github.com/steipete/oracle (for ideas only, not template)
 
 ## Testing

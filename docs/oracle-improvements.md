@@ -32,7 +32,7 @@ Migration from Puppeteer to Playwright is required.
 
 ### Chrome Window Invariants (macOS)
 
-Derived from `.work/research1.md` (Chrome window/focus review). Required for correctness and zero-focus-steal behavior.
+Required for correctness and zero-focus-steal behavior.
 
 **Invariants:**
 - Exactly **one** Chrome process for the oracle user-data-dir.
