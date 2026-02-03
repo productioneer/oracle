@@ -75,7 +75,10 @@ Note: Explicitly clicking the "New chat" button is unnecessary — navigating to
 ### 2.2 Type Message
 
 - **Type into**: `#prompt-textarea`
-- See [Appendix: Text Entry Research](#appendix-text-entry-research) for method options
+- **Primary method**: Synthetic `ClipboardEvent` paste (instant, works with ProseMirror)
+- **Fallback**: Character-by-character `keyboard.type()` with Shift+Enter for newlines
+- **Important**: ProseMirror maps Enter to "submit message". Newlines must use Shift+Enter.
+- See [Appendix: Text Entry Research](#appendix-text-entry-research) for details
 
 ### 2.3 Verify Prompt Entry
 
@@ -126,11 +129,13 @@ For multiple files, repeat steps 1-6.
 
 After sending, verify the prompt appears in the conversation:
 
-1. **Wait for**: `[data-testid='conversation-turn-{N}']` where N is the next odd number (1, 3, 5...)
+1. **Wait for**: `[data-testid='conversation-turn-{N}']` where N is `max(existing turn numbers) + 1`
 2. **Verify**: The turn contains `div[data-message-author-role="user"]`
 3. **Verify content**: `innerText` of the user message matches the submitted prompt
 
 This confirms the message was actually sent, not just that the button was clicked.
+
+> **Note on turn numbering**: Turn numbers are NOT guaranteed to alternate odd/even. ChatGPT may insert intermediate turns (for instance, a "thinking" turn) that have a `conversation-turn-{N}` wrapper but NO `data-message-author-role` attribute. The next user turn is always `max + 1`, regardless of parity. See [Turn Structure with Thinking](#turn-structure-with-thinking) below.
 
 ### 3.4 Wait for Thinking Panel
 
@@ -148,9 +153,9 @@ This step ensures we can monitor/extract thinking content.
 
 ### 3.5 Wait for Response Turn
 
-- **Wait for**: `[data-testid='conversation-turn-{N}']`
-  - N = highest even number (user turns are odd, assistant turns are even)
-  - Turn 2 = first response, Turn 4 = second response, etc.
+- **Scan forward** from the expected assistant turn number, checking `conversation-turn-{N}` through `conversation-turn-{N+3}` for one that contains `[data-message-author-role="assistant"]`
+- The assistant turn is NOT always `expectedTurn` exactly — ChatGPT may insert one or more intermediate "thinking" turns before the actual assistant response turn
+- See [Turn Structure with Thinking](#turn-structure-with-thinking) for details
 
 ### 3.6 Wait for Response Complete
 
@@ -228,6 +233,31 @@ Complete:    SVG contains <use href="...cdn-sprite...">
 
 ---
 
+## Turn Structure with Thinking
+
+When ChatGPT uses extended thinking (Pro mode), the DOM turn structure is NOT a simple alternation of user and assistant turns. ChatGPT inserts intermediate "thinking" turns that break the odd/even assumption.
+
+### Example DOM Structure (with thinking)
+
+```
+conversation-turn-1  →  data-message-author-role="user"      (user message)
+conversation-turn-2  →  NO data-message-author-role           (thinking turn — "Pro thinking")
+conversation-turn-3  →  data-message-author-role="assistant"  (assistant response)
+```
+
+### Key observations
+
+1. **Thinking turns have no `data-message-author-role`**: They contain the thinking panel UI but lack the role attribute that user and assistant turns have.
+2. **Turn numbering is sequential but not role-alternating**: `max + 1` is always the next turn number, regardless of whether the last turn was user, thinking, or assistant.
+3. **The assistant response may be 1-3 turns after the expected position**: After sending a user message, the assistant response might be at `expectedTurn`, `expectedTurn + 1`, `expectedTurn + 2`, or `expectedTurn + 3` depending on how many intermediate turns ChatGPT inserts.
+4. **Forward scanning is required**: When looking for the assistant response, scan forward from the expected position and check each turn for `[data-message-author-role="assistant"]`.
+
+### Impact on automation
+
+- `getNextUserTurnNumber()`: Use `max(existing turn numbers) + 1`, not odd/even logic
+- `getCompletionSnapshot()`: Scan forward up to 3 turns to find the assistant response
+- Turn verification: Check for `data-message-author-role` to identify turn type, not turn number parity
+
 ## Notes
 
 - Radix IDs (`#radix-_r_77_` etc.) are auto-generated and unreliable — use aria labels or text content instead
@@ -236,42 +266,60 @@ Complete:    SVG contains <use href="...cdn-sprite...">
 
 ---
 
-## Appendix: Text Entry Research
+## Appendix: Text Entry Methods (Validated)
 
-Research on text entry methods for ProseMirror contenteditable editors. **Not yet validated** - needs testing against the actual ChatGPT implementation.
+Validated results from testing against ChatGPT's ProseMirror contenteditable editor (February 2026).
 
-### Method Comparison (from research)
+### Method Comparison
 
-| Method | Expected Reliability | Notes |
-|--------|---------------------|-------|
-| `page.keyboard.type()` with delay | Likely high | Triggers full event chain (keydown → keypress → input → keyup) |
-| `pressSequentially()` | Likely high | Playwright equivalent, configurable delay |
-| `page.fill()` | Uncertain | May not trigger all ProseMirror events |
-| `page.evaluate()` + innerHTML | Likely low | Bypasses editor validation/state management |
-| `dispatchEvent(InputEvent)` | Likely low | Rich editors often ignore synthetic events |
-| `execCommand('insertText')` | Deprecated | Don't use |
+| Method | Reliability | Speed | Notes |
+|--------|-------------|-------|-------|
+| Synthetic `ClipboardEvent` paste | **High** ✅ | **Instant** | Primary method. ProseMirror handles paste natively. |
+| `page.keyboard.type()` + Shift+Enter | **High** ✅ | Slow (30ms/char) | Reliable fallback. Must use Shift+Enter for newlines. |
+| `page.fill()` | **Does not work** ❌ | — | ProseMirror ignores Playwright's `fill()` — no state update. |
+| `page.evaluate()` + innerHTML | **Does not work** ❌ | — | Bypasses ProseMirror state; editor doesn't recognize content. |
+| `dispatchEvent(InputEvent)` | **Does not work** ❌ | — | ProseMirror ignores synthetic input events. |
+| `execCommand('insertText')` | Deprecated | — | Don't use. |
 
-### Why Keyboard Simulation May Be Best
+### Primary Method: Synthetic Paste
 
-ProseMirror and similar rich text editors:
-- Validate input through their own state management (not just DOM)
-- Expect specific event sequences from real keyboard input
-- Often ignore or mishandle synthetic events
-
-### Suggested Approach (untested)
+ProseMirror's paste handler works with synthetic `ClipboardEvent` objects. This is instant regardless of text length — critical for large prompts (for instance, when file content is inlined due to the 10-file attachment limit).
 
 ```javascript
-// 1. Focus the editor
-await page.click('#prompt-textarea');
-
-// 2. Type with keyboard simulation and small delay
-await page.keyboard.type('Your message here', { delay: 30 });
+await page.evaluate((content) => {
+  const el = document.activeElement;
+  if (!el) return;
+  const dt = new DataTransfer();
+  dt.setData("text/plain", content);
+  const event = new ClipboardEvent("paste", {
+    clipboardData: dt,
+    bubbles: true,
+    cancelable: true,
+  });
+  el.dispatchEvent(event);
+}, text);
 ```
 
-The delay (30-50ms) ensures events are processed in sequence. This may be slower than direct injection but more likely to work reliably with ProseMirror's event handling.
+**Note**: ProseMirror calls `preventDefault()` on paste events, so `dispatchEvent()` returns `false`. This is normal — the paste IS processed. Do not use the return value as a success indicator. Instead, readback `innerText` from the editor to verify.
 
-### Open Questions
+### Fallback Method: Keyboard Typing
 
-- Does `page.fill()` actually work with ChatGPT's ProseMirror?
-- Is there a faster method that still triggers proper editor state updates?
-- Can we inject text via ProseMirror's API directly (if exposed)?
+Character-by-character keyboard typing with Shift+Enter for newlines. Slower but more reliable if paste ever breaks.
+
+```javascript
+await page.locator('#prompt-textarea').click();
+const lines = text.split("\n");
+for (let i = 0; i < lines.length; i++) {
+  if (lines[i]) await page.keyboard.type(lines[i], { delay: 30 });
+  if (i < lines.length - 1) await page.keyboard.press("Shift+Enter");
+}
+```
+
+**Critical**: ProseMirror maps Enter to "submit message" (sends the prompt). Newlines MUST use Shift+Enter, which ProseMirror maps to a line break within the message.
+
+### Retry Strategy
+
+1. **Attempt 1**: Paste via synthetic `ClipboardEvent`
+2. **Readback check**: Compare `innerText` of `#prompt-textarea` against expected prompt
+3. **Attempt 2 (if mismatch)**: Clear input, fall back to keyboard typing with Shift+Enter
+4. **Final check**: Readback again; abort if still mismatched

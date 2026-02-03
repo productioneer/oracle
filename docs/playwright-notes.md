@@ -124,14 +124,35 @@ await page.getByLabel('Upload file').setInputFiles('./file.pdf');
 
 ### Type into ContentEditable (ProseMirror)
 
+**Primary method — synthetic paste** (instant, works with ProseMirror):
+
 ```javascript
-// Focus and type with delays
+await page.locator('#prompt-textarea').click();
+await page.evaluate((content) => {
+  const el = document.activeElement;
+  if (!el) return;
+  const dt = new DataTransfer();
+  dt.setData("text/plain", content);
+  el.dispatchEvent(new ClipboardEvent("paste", {
+    clipboardData: dt, bubbles: true, cancelable: true,
+  }));
+}, 'Your message here');
+```
+
+**Fallback — keyboard typing** (slower, but reliable):
+
+```javascript
+// Focus and type with delays; use Shift+Enter for newlines (Enter = submit)
 await page.locator('#prompt-textarea').click();
 await page.keyboard.type('Your message here', { delay: 30 });
 
-// Or use pressSequentially for more control
-await page.locator('#prompt-textarea').pressSequentially('Your message', { delay: 50 });
+// For multi-line: Shift+Enter creates newlines, Enter submits
+await page.keyboard.type('Line 1', { delay: 30 });
+await page.keyboard.press('Shift+Enter');
+await page.keyboard.type('Line 2', { delay: 30 });
 ```
+
+**Important**: `page.fill()` does NOT work with ProseMirror — it bypasses the editor's state management. ProseMirror also ignores synthetic `InputEvent` dispatches. Only paste and keyboard events are processed correctly.
 
 ### Wait for Text
 
