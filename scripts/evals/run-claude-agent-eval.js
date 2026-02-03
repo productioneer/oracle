@@ -70,6 +70,7 @@ async function main() {
     ORACLE_EVAL_BASE_URL: baseUrl,
     ORACLE_BASE_URL: baseUrl,
     ORACLE_EVAL_TIMEOUT_MS: process.env.ORACLE_EVAL_TIMEOUT_MS || '120000',
+    ORACLE_DEV: '1',
   });
 
   const args = [
@@ -78,7 +79,7 @@ async function main() {
     '--print',
     '--verbose',
     '--output-format', 'stream-json',
-    '--permission-mode', 'dontAsk',
+    '--permission-mode', 'bypassPermissions',
     '--tools', 'Bash',
     '--no-session-persistence',
   ];

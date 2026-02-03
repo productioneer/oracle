@@ -6,6 +6,9 @@ DIST_CLI="$REPO_ROOT/dist/cli.js"
 SRC_CLI="$REPO_ROOT/src/cli.ts"
 EVAL_BASE_URL="${ORACLE_EVAL_BASE_URL:-http://127.0.0.1:7777/}"
 
+# Enable dev mode for non-chatgpt.com URLs (mock server)
+export ORACLE_DEV=1
+
 ARGS=("$@")
 if [ "${ARGS[0]:-}" = "run" ]; then
   FILTERED=()

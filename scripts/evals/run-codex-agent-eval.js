@@ -72,6 +72,7 @@ async function main() {
     ORACLE_EVAL_BASE_URL: baseUrl,
     ORACLE_BASE_URL: baseUrl,
     ORACLE_EVAL_TIMEOUT_MS: process.env.ORACLE_EVAL_TIMEOUT_MS || '120000',
+    ORACLE_DEV: '1',
   });
 
   const codex = new Codex({ env });
@@ -80,6 +81,7 @@ async function main() {
     skipGitRepoCheck: true,
     sandboxMode: 'danger-full-access',
     approvalPolicy: 'never',
+    modelReasoningEffort: 'medium',
     webSearchEnabled: false,
     webSearchMode: 'disabled',
     networkAccessEnabled: false,
