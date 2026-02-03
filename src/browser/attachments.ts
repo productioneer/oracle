@@ -63,11 +63,15 @@ const loggedSelectorMismatches = new Set<string>();
  * Returns any overflow attachments that couldn't be uploaded due to
  * ChatGPT's per-message file limit. Caller should inline these into
  * the prompt text.
+ *
+ * @param browserPid - Chrome process PID for PID-targeted AppleScript (macOS only).
+ *                     Required to avoid affecting personal Chrome instances.
  */
 export async function uploadAttachments(
   page: Page,
   attachments: Attachment[],
   logger?: (message: string) => void,
+  browserPid?: number,
 ): Promise<Attachment[]> {
   const max = getMaxUploadAttachments();
   const toUpload = attachments.slice(0, max);
@@ -81,7 +85,7 @@ export async function uploadAttachments(
   }
 
   for (const attachment of toUpload) {
-    await uploadSingleAttachment(page, attachment, logger);
+    await uploadSingleAttachment(page, attachment, logger, browserPid);
   }
 
   return overflow;
@@ -91,6 +95,7 @@ async function uploadSingleAttachment(
   page: Page,
   attachment: Attachment,
   logger?: (message: string) => void,
+  browserPid?: number,
 ): Promise<void> {
   const stats = await stat(attachment.path);
   if (stats.size > MAX_FILE_SIZE_BYTES) {
@@ -126,7 +131,7 @@ async function uploadSingleAttachment(
         logger,
       );
       await waitForUploadComplete(page, attachment.displayName, logger);
-      await assertNoNativeDialogOpen(logger);
+      await assertNoNativeDialogOpen(logger, browserPid);
       return;
     } catch (error) {
       lastError = error;
@@ -134,7 +139,7 @@ async function uploadSingleAttachment(
         logger,
         `upload attempt failed (${attempt}): ${error instanceof Error ? error.message : String(error)}`,
       );
-      await assertNoNativeDialogOpen(logger).catch((closeError) => {
+      await assertNoNativeDialogOpen(logger, browserPid).catch((closeError) => {
         logDebug(
           logger,
           `native dialog cleanup failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
@@ -498,17 +503,18 @@ function buildUploadStrategyOrder(primary: UploadStrategy): UploadStrategy[] {
 
 async function assertNoNativeDialogOpen(
   logger?: (message: string) => void,
+  browserPid?: number,
 ): Promise<void> {
   if (!shouldCheckNativeDialog()) return;
-  const counts = await getChromeDialogCounts(logger);
+  const counts = await getChromeDialogCounts(logger, browserPid);
   if (!counts) return;
   if (counts.sheetCount > 0 || counts.dialogCount > 0) {
     logger?.(
       `[attachments] native dialog open (sheets=${counts.sheetCount}, dialogs=${counts.dialogCount})`,
     );
-    await dismissNativeDialogs(logger);
+    await dismissNativeDialogs(logger, browserPid);
     await sleep(200);
-    const after = await getChromeDialogCounts(logger);
+    const after = await getChromeDialogCounts(logger, browserPid);
     if (!after) {
       throw new Error("Native file chooser dialog still open");
     }
@@ -528,11 +534,17 @@ function shouldCheckNativeDialog(): boolean {
 
 async function getChromeDialogCounts(
   logger?: (message: string) => void,
+  browserPid?: number,
 ): Promise<{ sheetCount: number; dialogCount: number } | null> {
   const { execFile } = await import("child_process");
+  // Use PID targeting when available to only check Oracle Chrome, not personal Chrome.
+  // Without PID, fall back to process name (affects all Chrome instances).
+  const processSelector = browserPid
+    ? `(first process whose unix id is ${browserPid})`
+    : 'process "Google Chrome"';
   const script = [
     'tell application "System Events"',
-    'tell process "Google Chrome"',
+    `tell ${processSelector}`,
     "set sheetTotal to 0",
     "set dialogTotal to 0",
     "repeat with w in windows",
@@ -568,11 +580,17 @@ async function getChromeDialogCounts(
 
 async function dismissNativeDialogs(
   logger?: (message: string) => void,
+  browserPid?: number,
 ): Promise<void> {
   const { execFile } = await import("child_process");
+  // Use PID targeting when available to only dismiss dialogs in Oracle Chrome.
+  // Without PID, fall back to process name (affects all Chrome instances).
+  const processSelector = browserPid
+    ? `(first process whose unix id is ${browserPid})`
+    : 'process "Google Chrome"';
   const script = [
     'tell application "System Events"',
-    'tell process "Google Chrome"',
+    `tell ${processSelector}`,
     "set closedCount to 0",
     "repeat with w in windows",
     "repeat with s in sheets of w",

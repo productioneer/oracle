@@ -428,6 +428,7 @@ async function runAttempt(
                 page,
                 config.attachments,
                 logger,
+                config.browserPid,
               );
               const uploaded = config.attachments.length - overflow.length;
               logger(

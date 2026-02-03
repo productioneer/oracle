@@ -14,6 +14,8 @@
     "worker": "tsx src/worker.ts",
     "lint": "echo 'no lint configured'",
     "test": "npm run build && node --test tests/*.test.js",
+    "test:safe": "npm run build && node --test tests/attachments.test.js tests/chatgpt-submit.test.js tests/chrome-restart-approval.test.js tests/cli-errors.test.js tests/cli-result.test.js tests/endurance.test.js tests/extraction.test.js tests/firefox-app.test.js tests/firefox-home.test.js tests/firefox-process.test.js tests/firefox-xulstore.test.js tests/focus-monitor.test.js tests/focus.test.js tests/personal-chrome.test.js tests/profiles.test.js tests/recovery.test.js tests/run-options.test.js tests/telemetry.test.js tests/thinking-extraction.test.js tests/thinking-panel.test.js tests/thinking-state.test.js",
+    "test:chrome": "npm run build && node --test tests/window-observer.test.js tests/monitor-integration.test.js tests/focus-positive.test.js",
     "test:mock": "node scripts/mock-server.js --once",
     "eval:agents": "node scripts/evals/run-agent-evals.js",
     "eval:codex": "node scripts/evals/run-codex-agent-eval.js",

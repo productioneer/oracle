@@ -63,13 +63,10 @@
 - **What's tested**: isGenerating, isResponseComplete, copy button + content requirement, generating→complete transition, generating→failed transition, content-change stall timer reset
 - **What's remaining**: Worker-level recovery paths (attemptRecovery, waitForCompletionWithCancel). These require mocking the full worker context (browser, page navigation, health checks).
 
-#### P4: Cloudflare Handling
-- **What**: Verify Oracle handles Cloudflare challenges correctly
-- **Category**: C (needs human — can't trigger Cloudflare on demand)
-- **Action**: Escalate to human. Define what "correct handling" means:
-  - Detect challenge → transition to needs_user state
-  - User solves challenge → Oracle resumes
-  - Challenge appears mid-run → recovery flow
+#### P4: Cloudflare Handling — ✅ Accepted
+- **Status**: Current behavior accepted as sufficient (Block 10)
+- **Behavior**: Detect challenge → transition to needs_user state → user solves → Oracle resumes
+- **Decision**: Human accepted this as production-ready; no additional handling needed
 
 #### P5: Mock Sync Process — ✅ Complete
 - **Status**: Documented at `.work/mock-sync-inventory.md` (Block 4)

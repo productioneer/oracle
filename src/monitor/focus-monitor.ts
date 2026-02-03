@@ -139,32 +139,41 @@ async function isOracleChromeProcess(
   pid: number,
   oracleUserDataDir: string,
 ): Promise<boolean> {
-  // First check the specific PID
+  // Check if the specific frontmost PID is the Oracle Chrome process
   const directMatch = await checkPidForUserDataDir(pid, oracleUserDataDir);
   if (directMatch) return true;
 
-  // On macOS, when Chrome becomes frontmost, the reported PID may be the
-  // "parent" Chrome process rather than the specific Oracle instance. Check
-  // if any Chrome process with our user-data-dir is running — if so, the
-  // Oracle Chrome instance exists and Chrome is frontmost, which is a violation.
+  // On macOS, the frontmost Chrome PID might be a helper process rather than
+  // the main browser process. Check parent-child relationships by looking for
+  // Chrome processes where the main process has our user-data-dir AND the
+  // frontmost PID appears to be in the same process group.
+  //
+  // Note: We intentionally DON'T just check "is any Oracle Chrome running" —
+  // that would incorrectly flag personal Chrome as a violation when Oracle
+  // Chrome is running hidden in the background.
   return new Promise((resolve) => {
     execFile(
       "ps",
-      ["ax", "-o", "command="],
-      { maxBuffer: 1024 * 1024 },
+      ["-p", String(pid), "-o", "ppid=,command="],
       (error, stdout) => {
         if (error) {
           resolve(false);
           return;
         }
-        const hasOracleInstance = stdout
-          .split("\n")
-          .some(
-            (line) =>
-              line.includes("Google Chrome") &&
-              line.includes(`--user-data-dir=${oracleUserDataDir}`),
-          );
-        resolve(hasOracleInstance);
+        // Check if this process or its parent is Oracle Chrome
+        const line = stdout.trim();
+        const ppidMatch = line.match(/^\s*(\d+)\s+/);
+        if (!ppidMatch) {
+          resolve(false);
+          return;
+        }
+        const ppid = parseInt(ppidMatch[1], 10);
+        if (isNaN(ppid) || ppid <= 1) {
+          resolve(false);
+          return;
+        }
+        // Check the parent process
+        checkPidForUserDataDir(ppid, oracleUserDataDir).then(resolve);
       },
     );
   });

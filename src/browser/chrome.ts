@@ -7,7 +7,6 @@ import type { Browser, Page } from "playwright";
 import { sleep } from "../utils/time.js";
 import type { Logger } from "../utils/log.js";
 import { oracleChromeDataDir } from "./profiles.js";
-import { isPersonalChromeRunning } from "./personal-chrome.js";
 
 export type ChromeLaunchOptions = {
   userDataDir?: string;
@@ -132,25 +131,17 @@ export async function createHiddenPage(
     const preferredWindowId = await getWindowIdForPage(page, options.logger);
     await ensureChromeWindowHidden(browser, options.logger, preferredWindowId);
     // On macOS, also hide via AppleScript. CDP offscreen positioning is
-    // unreliable because macOS clamps window coordinates. App-level hiding
-    // (`visible = false`) makes the window truly invisible while keeping
-    // the renderer active (unlike minimize which suspends it).
+    // unreliable because macOS clamps window coordinates. Window-level
+    // visibility (`visible = false`) makes the window truly invisible while
+    // keeping the renderer active (unlike minimize which suspends it).
     //
-    // IMPORTANT: Skip app-level hiding when personal Chrome is running,
-    // UNLESS ORACLE_FORCE_APP_HIDE=1 is set. macOS may apply visibility
-    // changes to ALL Chrome instances sharing the same app identity,
-    // which would hide the user's personal Chrome.
-    if (process.platform === "darwin" && options.browserPid) {
-      const forceHide = process.env.ORACLE_FORCE_APP_HIDE === "1";
-      const oracleDir = options.userDataDir ?? oracleChromeDataDir();
-      const personalRunning = await isPersonalChromeRunning(oracleDir);
-      if (personalRunning && !forceHide) {
-        options.logger?.(
-          "[chrome] skipping AppleScript hide — personal Chrome is running (set ORACLE_FORCE_APP_HIDE=1 to override)",
-        );
-      } else {
-        await hideChromeMac(options.browserPid, options.logger);
-      }
+    // We use Chrome's AppleScript dictionary to target specific windows by
+    // their offscreen position (x < 0), which ensures we only hide Oracle's
+    // window — not the user's personal Chrome windows.
+    if (process.platform === "darwin") {
+      // Small delay to ensure CDP position change is reflected in AppleScript
+      await sleep(200);
+      await hideChromeMacOffscreen(options.logger);
     }
   }
   return page;
@@ -160,22 +151,30 @@ export async function createHiddenPage(
 // Window hiding is handled by ensureChromeWindowHidden → hideChromeWindowById.
 
 /**
- * Hide Chrome via macOS AppleScript (`set visible to false`).
- * Targets the specific Chrome process by PID to avoid hiding
- * the user's personal Chrome. Unlike minimize, app-level hiding
- * keeps the renderer active so CDP input events still process.
+ * Hide Chrome windows that are positioned offscreen via macOS AppleScript.
+ * Uses Chrome's own AppleScript dictionary to set `visible` on specific windows,
+ * which only affects the targeted window — not other Chrome instances.
+ *
+ * This identifies Oracle's window by its offscreen position (x < 0), which is set
+ * by CDP before this function runs. This approach doesn't require knowing the URL.
+ *
+ * This replaces the old System Events approach (`set visible of process`) which
+ * affected ALL Chrome instances due to macOS treating them as one application.
  */
-async function hideChromeMac(pid: number, logger?: Logger): Promise<void> {
+async function hideChromeMacOffscreen(logger?: Logger): Promise<void> {
   const script = [
-    'tell application "System Events"',
-    `set matches to (every process whose unix id is ${pid})`,
-    'if (count of matches) = 0 then return "missing"',
-    "set targetProc to item 1 of matches",
-    "tell targetProc",
-    "set visible to false",
-    "set frontmost to false",
-    "end tell",
-    'return "ok"',
+    'tell application "Google Chrome"',
+    "set hiddenCount to 0",
+    "repeat with w in windows",
+    "try",
+    "set b to bounds of w",
+    "if (item 1 of b) < 0 then",
+    "set visible of w to false",
+    "set hiddenCount to hiddenCount + 1",
+    "end if",
+    "end try",
+    "end repeat",
+    "return hiddenCount",
     "end tell",
   ];
   try {
@@ -183,7 +182,7 @@ async function hideChromeMac(pid: number, logger?: Logger): Promise<void> {
       execFile(
         "osascript",
         script.flatMap((line) => ["-e", line]),
-        { timeout: 2000 },
+        { timeout: 3000 },
         (error, stdout, stderr) => {
           if (error) {
             resolve({ ok: false, stdout: stdout ?? "", error: `${error.message}\n${stderr}`.trim() });
@@ -194,11 +193,11 @@ async function hideChromeMac(pid: number, logger?: Logger): Promise<void> {
       );
     });
     if (result.ok) {
-      const output = result.stdout.trim().toLowerCase();
-      if (output === "missing") {
-        logger?.("[chrome] hide via AppleScript: process not found");
+      const hiddenCount = parseInt(result.stdout.trim(), 10) || 0;
+      if (hiddenCount > 0) {
+        logger?.(`[chrome] hidden ${hiddenCount} offscreen window(s) via AppleScript`);
       } else {
-        logger?.("[chrome] hidden via AppleScript (visible=false)");
+        logger?.("[chrome] no offscreen windows found to hide");
       }
     } else {
       logger?.(`[chrome] AppleScript hide failed: ${result.error}`);

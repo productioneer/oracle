@@ -43,11 +43,11 @@ export class WindowObserver {
   constructor(options?: WindowObserverOptions) {
     this.intervalMs = options?.intervalMs ?? 500;
     this.telemetry = options?.telemetry ?? null;
-    // Oracle parks windows at -32000,-32000. A window is considered "parked
-    // offscreen" only if BOTH coordinates are far negative, avoiding false
-    // negatives on multi-monitor setups where one axis might be moderately
-    // negative. Real monitors rarely go beyond -6000 on any axis.
-    this.hiddenThreshold = options?.hiddenThreshold ?? -10000;
+    // Oracle parks windows at -32000,-32000, but macOS clamps coordinates to
+    // around -4000 depending on display configuration. A window is considered
+    // "parked offscreen" if either coordinate is far negative (beyond any
+    // reasonable monitor extent). Real monitors rarely extend beyond -3000.
+    this.hiddenThreshold = options?.hiddenThreshold ?? -3000;
     this.browserPid = options?.browserPid;
   }
 
@@ -159,7 +159,7 @@ export class WindowObserver {
           const windowState = b.windowState ?? "normal";
 
           const parkedOffscreen =
-            left <= this.hiddenThreshold && top <= this.hiddenThreshold;
+            left <= this.hiddenThreshold || top <= this.hiddenThreshold;
           const isMinimized = windowState === "minimized";
           // Window is visible only if: not minimized, not parked offscreen,
           // AND not hidden at the macOS app level.
