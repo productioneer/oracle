@@ -7,6 +7,7 @@ import type { Browser, Page } from "playwright";
 import { sleep } from "../utils/time.js";
 import type { Logger } from "../utils/log.js";
 import { oracleChromeDataDir } from "./profiles.js";
+import { isPersonalChromeRunning } from "./personal-chrome.js";
 
 export type ChromeLaunchOptions = {
   userDataDir?: string;
@@ -103,7 +104,12 @@ export async function launchChrome(
 export async function createHiddenPage(
   browser: Browser,
   token: string,
-  options: { allowVisible?: boolean; browserPid?: number; logger?: Logger } = {},
+  options: {
+    allowVisible?: boolean;
+    browserPid?: number;
+    userDataDir?: string;
+    logger?: Logger;
+  } = {},
 ): Promise<Page> {
   const context = browser.contexts()[0] ?? (await browser.newContext());
   let page: Page | null =
@@ -129,8 +135,22 @@ export async function createHiddenPage(
     // unreliable because macOS clamps window coordinates. App-level hiding
     // (`visible = false`) makes the window truly invisible while keeping
     // the renderer active (unlike minimize which suspends it).
+    //
+    // IMPORTANT: Skip app-level hiding when personal Chrome is running,
+    // UNLESS ORACLE_FORCE_APP_HIDE=1 is set. macOS may apply visibility
+    // changes to ALL Chrome instances sharing the same app identity,
+    // which would hide the user's personal Chrome.
     if (process.platform === "darwin" && options.browserPid) {
-      await hideChromeMac(options.browserPid, options.logger);
+      const forceHide = process.env.ORACLE_FORCE_APP_HIDE === "1";
+      const oracleDir = options.userDataDir ?? oracleChromeDataDir();
+      const personalRunning = await isPersonalChromeRunning(oracleDir);
+      if (personalRunning && !forceHide) {
+        options.logger?.(
+          "[chrome] skipping AppleScript hide — personal Chrome is running (set ORACLE_FORCE_APP_HIDE=1 to override)",
+        );
+      } else {
+        await hideChromeMac(options.browserPid, options.logger);
+      }
     }
   }
   return page;

@@ -45,42 +45,26 @@ test('focus monitor detects violation when Oracle Chrome becomes frontmost', asy
 
     // Attempt to bring Chrome to front via osascript (simulating a focus-theft bug).
     // On macOS, Chrome launched hidden may resist activation — the osascript may
-    // succeed without actually changing focus, or the frontmost PID may differ
-    // from browserPid (macOS app activation mechanics). We try multiple methods.
+    // succeed without actually changing focus.
+    //
+    // IMPORTANT: We ONLY use PID-targeted activation. App-name targeting (e.g.,
+    // `tell application "Google Chrome" to activate`) is forbidden because it
+    // would activate ANY Chrome, including the user's personal Chrome.
     let activated = false;
     try {
-      // Method 1: activate by PID
       execSync(
         `osascript -e 'tell application "System Events" to set frontmost of (first process whose unix id is ${browserPid}) to true'`,
         { timeout: 3000 },
       );
-      // Verify Chrome actually became frontmost
-      const check = execSync(
-        'osascript -e \'tell application "System Events" to return name of first application process whose frontmost is true\'',
+      // Verify OUR Chrome (by PID) actually became frontmost, not some other Chrome
+      const frontmostPid = parseInt(execSync(
+        'osascript -e \'tell application "System Events" to return unix id of first application process whose frontmost is true\'',
         { timeout: 3000 },
-      ).toString().trim();
-      if (check === 'Google Chrome') {
+      ).toString().trim(), 10);
+      if (frontmostPid === browserPid) {
         activated = true;
       }
     } catch { /* ignore */ }
-
-    if (!activated) {
-      // Method 2: activate by app name
-      try {
-        execSync(
-          'osascript -e \'tell application "Google Chrome" to activate\'',
-          { timeout: 3000 },
-        );
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        const check = execSync(
-          'osascript -e \'tell application "System Events" to return name of first application process whose frontmost is true\'',
-          { timeout: 3000 },
-        ).toString().trim();
-        if (check === 'Google Chrome') {
-          activated = true;
-        }
-      } catch { /* ignore */ }
-    }
 
     if (!activated) {
       // Chrome resisted activation — test is inconclusive, not a failure.

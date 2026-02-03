@@ -78,6 +78,7 @@ You can set `ORACLE_DEV=1` to expose `--timeout-ms` for long-run testing.
 - Use `--focus-only` to test Firefox focus suppression without navigating to ChatGPT. Focus-only runs do not pool Firefox; the automation instance is closed after each run.
 - Debug artifacts (HTML/PNG) are written to `~/.oracle/runs/<run_id>/debug` when prompt input fails or when running against localhost.
 - If Chrome is stuck and you pass `--allow-kill`, Oracle requests graceful shutdown first (SIGTERM, waits ~10s). If Chrome doesn't exit, set `ORACLE_FORCE_KILL=1` to enable SIGKILL.
+- **Personal Chrome isolation**: On macOS, Oracle skips app-level hiding when your personal Chrome is running, to avoid accidentally hiding your browser. This means Oracle Chrome may be partially visible (parked offscreen) during runs. Set `ORACLE_FORCE_APP_HIDE=1` to force app-level hiding for maximum stealth, but note this may hide your personal Chrome windows too.
 
 ## Development
 
