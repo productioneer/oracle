@@ -298,6 +298,52 @@ export async function setThinkingMode(
   );
 }
 
+/**
+ * Paste text into ChatGPT's ProseMirror editor via a synthetic ClipboardEvent.
+ * Much faster than character-by-character typing, especially for long prompts
+ * (e.g. inlined file content). Falls back to character-by-character Shift+Enter
+ * typing if the paste doesn't produce the expected result.
+ */
+async function typeIntoEditor(page: Page, text: string): Promise<void> {
+  const trimmed = text.replace(/\n+$/, "");
+
+  // Paste via synthetic ClipboardEvent — instant regardless of text length.
+  // ProseMirror calls preventDefault() on paste (returning false from
+  // dispatchEvent), so we can't use the return value as a success indicator.
+  // The caller (submitPrompt) does a readback check and retries if needed.
+  await page.evaluate((content: string) => {
+    const el = document.activeElement;
+    if (!el) return;
+    const dt = new DataTransfer();
+    dt.setData("text/plain", content);
+    const event = new ClipboardEvent("paste", {
+      clipboardData: dt,
+      bubbles: true,
+      cancelable: true,
+    });
+    el.dispatchEvent(event);
+  }, trimmed);
+}
+
+/**
+ * Type text into ChatGPT's ProseMirror editor character-by-character.
+ * Newlines are typed as Shift+Enter (creates line break) instead of Enter
+ * (which ProseMirror maps to "submit message"). Trailing newlines are trimmed.
+ * Slower than paste but more reliable as a fallback.
+ */
+async function typeIntoEditorKeyboard(page: Page, text: string, delay = 30): Promise<void> {
+  const trimmed = text.replace(/\n+$/, "");
+  const lines = trimmed.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i]) {
+      await page.keyboard.type(lines[i], { delay });
+    }
+    if (i < lines.length - 1) {
+      await page.keyboard.press("Shift+Enter");
+    }
+  }
+}
+
 export async function submitPrompt(
   page: Page,
   prompt: string,
@@ -331,10 +377,14 @@ export async function submitPrompt(
   let typedValue = "";
   let typedNormalized = "";
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    logDebug(logger, `typing prompt attempt ${attempt + 1}`);
+    logDebug(logger, `typing prompt attempt ${attempt + 1}${attempt > 0 ? " (keyboard fallback)" : " (paste)"}`);
     await clearInput();
     await input.click();
-    await page.keyboard.type(preparedPrompt, { delay: 30 });
+    if (attempt === 0) {
+      await typeIntoEditor(page, preparedPrompt);
+    } else {
+      await typeIntoEditorKeyboard(page, preparedPrompt);
+    }
     await sleep(50);
     typedValue = await readInputValue();
     typedNormalized = normalizeTextForCompare(typedValue);
@@ -424,8 +474,7 @@ export async function getNextUserTurnNumber(page: Page): Promise<number> {
       })
       .filter((value) => Number.isFinite(value)) as number[];
     const max = numbers.length ? Math.max(...numbers) : 0;
-    if (max <= 0) return 1;
-    return max % 2 === 0 ? max + 1 : max + 2;
+    return max + 1;
   });
 }
 
@@ -931,13 +980,26 @@ async function getCompletionSnapshot(
       let expectedContainer: HTMLElement | null = null;
       let expectedAssistant: HTMLElement | null = null;
       if (typeof expectedTurn === "number") {
-        const expectedSelector = `[data-testid="conversation-turn-${expectedTurn}"]`;
-        expectedContainer = document.querySelector(expectedSelector) as HTMLElement | null;
-        expectedTurnFound = Boolean(expectedContainer);
-        expectedAssistant = expectedContainer
-          ? (expectedContainer.querySelector(selectors.assistantMessage) as HTMLElement | null)
-          : null;
-        expectedAssistantFound = Boolean(expectedAssistant);
+        // Check if the base expected turn container exists (tracks readiness)
+        const baseSelector = `[data-testid="conversation-turn-${expectedTurn}"]`;
+        expectedTurnFound = Boolean(document.querySelector(baseSelector));
+
+        // Scan forward from expectedTurn to find the actual assistant response.
+        // ChatGPT may insert intermediate turns (e.g. a "thinking" turn with no
+        // data-message-author-role) between the user and assistant turns.
+        for (let offset = 0; offset <= 3; offset++) {
+          const turnNum = expectedTurn + offset;
+          const turnSelector = `[data-testid="conversation-turn-${turnNum}"]`;
+          const turnEl = document.querySelector(turnSelector) as HTMLElement | null;
+          if (!turnEl) continue;
+          const assistantEl = turnEl.querySelector(selectors.assistantMessage) as HTMLElement | null;
+          if (assistantEl) {
+            expectedContainer = turnEl;
+            expectedAssistant = assistantEl;
+            expectedAssistantFound = true;
+            break;
+          }
+        }
       }
       const targetAssistant =
         typeof expectedTurn === "number" ? expectedAssistant : last;
