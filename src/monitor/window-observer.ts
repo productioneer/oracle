@@ -1,4 +1,5 @@
 import type { Browser, CDPSession } from "playwright";
+import { execFile } from "child_process";
 import type { WindowEvent, WindowReport } from "./types.js";
 import type { Telemetry } from "./telemetry.js";
 
@@ -6,6 +7,11 @@ type WindowObserverOptions = {
   intervalMs?: number;
   telemetry?: Telemetry;
   hiddenThreshold?: number;
+  /** Chrome PID for macOS app-visibility checks. When provided, the observer
+   *  queries macOS via AppleScript to detect app-level hiding (set visible to
+   *  false). This is more reliable than CDP bounds alone because macOS clamps
+   *  offscreen window positions. */
+  browserPid?: number;
 };
 
 type WindowState = {
@@ -27,7 +33,12 @@ export class WindowObserver {
   private readonly intervalMs: number;
   private readonly telemetry: Telemetry | null;
   private readonly hiddenThreshold: number;
+  private readonly browserPid: number | undefined;
   private polling = false;
+
+  // macOS app-visibility cache (updated every ~2s)
+  private macAppHidden = false;
+  private macVisTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options?: WindowObserverOptions) {
     this.intervalMs = options?.intervalMs ?? 500;
@@ -37,6 +48,7 @@ export class WindowObserver {
     // negatives on multi-monitor setups where one axis might be moderately
     // negative. Real monitors rarely go beyond -6000 on any axis.
     this.hiddenThreshold = options?.hiddenThreshold ?? -10000;
+    this.browserPid = options?.browserPid;
   }
 
   async start(browser: Browser): Promise<void> {
@@ -47,6 +59,14 @@ export class WindowObserver {
 
     this.cdp = await browser.newBrowserCDPSession();
 
+    // On macOS with a known PID, start periodic app-visibility checks.
+    if (process.platform === "darwin" && this.browserPid) {
+      this.macAppHidden = false;
+      await this.checkMacVisibility(); // initial check
+      this.macVisTimer = setInterval(() => this.checkMacVisibility(), 2000);
+      this.macVisTimer.unref?.();
+    }
+
     this.timer = setInterval(() => this.poll(), this.intervalMs);
     this.timer.unref?.();
     await this.poll();
@@ -56,6 +76,10 @@ export class WindowObserver {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    if (this.macVisTimer) {
+      clearInterval(this.macVisTimer);
+      this.macVisTimer = null;
     }
     if (this.cdp) {
       await this.cdp.detach().catch(() => null);
@@ -70,6 +94,35 @@ export class WindowObserver {
 
   getEvents(): WindowEvent[] {
     return [...this.events];
+  }
+
+  private async checkMacVisibility(): Promise<void> {
+    if (!this.browserPid) return;
+    const script = [
+      'tell application "System Events"',
+      `set matches to (every process whose unix id is ${this.browserPid})`,
+      'if (count of matches) = 0 then return "missing"',
+      "return visible of item 1 of matches",
+      "end tell",
+    ];
+    try {
+      const result = await new Promise<string>((resolve) => {
+        execFile(
+          "osascript",
+          script.flatMap((line) => ["-e", line]),
+          { timeout: 2000 },
+          (error, stdout) => {
+            if (error) resolve("error");
+            else resolve((stdout ?? "").trim().toLowerCase());
+          },
+        );
+      });
+      // "false" means the app is hidden (good). "true" means visible (potential violation).
+      this.macAppHidden = result === "false";
+    } catch {
+      // On error, don't assume hidden — conservative approach
+      this.macAppHidden = false;
+    }
   }
 
   private async poll(): Promise<void> {
@@ -107,8 +160,10 @@ export class WindowObserver {
 
           const parkedOffscreen =
             left <= this.hiddenThreshold && top <= this.hiddenThreshold;
-          const notMinimized = windowState !== "minimized";
-          const visible = notMinimized && !parkedOffscreen;
+          const isMinimized = windowState === "minimized";
+          // Window is visible only if: not minimized, not parked offscreen,
+          // AND not hidden at the macOS app level.
+          const visible = !isMinimized && !parkedOffscreen && !this.macAppHidden;
 
           const current: WindowState = {
             windowId: windowInfo.windowId,
@@ -159,6 +214,7 @@ function statesEqual(a: WindowState, b: WindowState): boolean {
     a.top === b.top &&
     a.width === b.width &&
     a.height === b.height &&
-    a.windowState === b.windowState
+    a.windowState === b.windowState &&
+    a.visible === b.visible
   );
 }

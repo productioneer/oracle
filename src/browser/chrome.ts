@@ -1,5 +1,5 @@
 import fs from "fs";
-import { spawn } from "child_process";
+import { spawn, execFile } from "child_process";
 import http from "http";
 import path from "path";
 import { chromium } from "playwright";
@@ -103,7 +103,7 @@ export async function launchChrome(
 export async function createHiddenPage(
   browser: Browser,
   token: string,
-  options: { allowVisible?: boolean; logger?: Logger } = {},
+  options: { allowVisible?: boolean; browserPid?: number; logger?: Logger } = {},
 ): Promise<Page> {
   const context = browser.contexts()[0] ?? (await browser.newContext());
   let page: Page | null =
@@ -125,63 +125,66 @@ export async function createHiddenPage(
   if (!options.allowVisible) {
     const preferredWindowId = await getWindowIdForPage(page, options.logger);
     await ensureChromeWindowHidden(browser, options.logger, preferredWindowId);
+    // On macOS, also hide via AppleScript. CDP offscreen positioning is
+    // unreliable because macOS clamps window coordinates. App-level hiding
+    // (`visible = false`) makes the window truly invisible while keeping
+    // the renderer active (unlike minimize which suspends it).
+    if (process.platform === "darwin" && options.browserPid) {
+      await hideChromeMac(options.browserPid, options.logger);
+    }
   }
   return page;
 }
 
-async function hideChromeWindowForPage(
-  page: Page,
-  logger?: Logger,
-): Promise<void> {
-  let lastError: unknown;
-  const start = Date.now();
-  const timeoutMs = 2_000;
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const client = await page.context().newCDPSession(page);
-      const { windowId } = await client.send("Browser.getWindowForTarget");
-      const current = await client
-        .send("Browser.getWindowBounds", { windowId })
-        .catch(() => null);
-      if (current?.bounds?.windowState === "minimized") {
-        await client.detach().catch(() => null);
-        return;
+// hideChromeWindowForPage removed — was dead code (never called).
+// Window hiding is handled by ensureChromeWindowHidden → hideChromeWindowById.
+
+/**
+ * Hide Chrome via macOS AppleScript (`set visible to false`).
+ * Targets the specific Chrome process by PID to avoid hiding
+ * the user's personal Chrome. Unlike minimize, app-level hiding
+ * keeps the renderer active so CDP input events still process.
+ */
+async function hideChromeMac(pid: number, logger?: Logger): Promise<void> {
+  const script = [
+    'tell application "System Events"',
+    `set matches to (every process whose unix id is ${pid})`,
+    'if (count of matches) = 0 then return "missing"',
+    "set targetProc to item 1 of matches",
+    "tell targetProc",
+    "set visible to false",
+    "set frontmost to false",
+    "end tell",
+    'return "ok"',
+    "end tell",
+  ];
+  try {
+    const result = await new Promise<{ ok: boolean; stdout: string; error?: string }>((resolve) => {
+      execFile(
+        "osascript",
+        script.flatMap((line) => ["-e", line]),
+        { timeout: 2000 },
+        (error, stdout, stderr) => {
+          if (error) {
+            resolve({ ok: false, stdout: stdout ?? "", error: `${error.message}\n${stderr}`.trim() });
+          } else {
+            resolve({ ok: true, stdout: stdout ?? "" });
+          }
+        },
+      );
+    });
+    if (result.ok) {
+      const output = result.stdout.trim().toLowerCase();
+      if (output === "missing") {
+        logger?.("[chrome] hide via AppleScript: process not found");
+      } else {
+        logger?.("[chrome] hidden via AppleScript (visible=false)");
       }
-      try {
-        await client.send("Browser.setWindowBounds", {
-          windowId,
-          bounds: { windowState: "minimized" },
-        });
-      } catch (error) {
-        logger?.(`[chrome] minimize failed: ${String(error)}`);
-      }
-      const after = await client
-        .send("Browser.getWindowBounds", { windowId })
-        .catch(() => null);
-      if (after?.bounds?.windowState !== "minimized") {
-        await client.send("Browser.setWindowBounds", {
-          windowId,
-          bounds: {
-            left: -32000,
-            top: -32000,
-            width: MIN_WINDOW_WIDTH,
-            height: MIN_WINDOW_HEIGHT,
-          },
-        });
-        await client.send("Browser.setWindowBounds", {
-          windowId,
-          bounds: { windowState: "minimized" },
-        });
-      }
-      await client.detach().catch(() => null);
-      return;
-    } catch (error) {
-      lastError = error;
-      await sleep(200);
+    } else {
+      logger?.(`[chrome] AppleScript hide failed: ${result.error}`);
     }
-  }
-  if (lastError) {
-    logger?.(`[chrome] hide window failed: ${String(lastError)}`);
+  } catch (error) {
+    logger?.(`[chrome] AppleScript hide error: ${String(error)}`);
   }
 }
 
@@ -315,10 +318,26 @@ async function hideChromeWindowById(
       },
     });
   }
-  if (!isMinimized) {
+  // Do NOT minimize — macOS suspends the renderer for minimized windows,
+  // breaking keyboard input (e.g., ProseMirror in ChatGPT). The offscreen
+  // position (-32000, -32000) combined with -g launch flag is sufficient
+  // to keep the window invisible and prevent focus theft.
+  if (isMinimized) {
+    // Set offscreen position first (applies to restored geometry), then
+    // restore from minimized. This avoids a brief flash at the pre-minimize
+    // position when the window comes out of minimized state.
     await cdp.send("Browser.setWindowBounds", {
       windowId,
-      bounds: { windowState: "minimized" },
+      bounds: {
+        left: -32000,
+        top: -32000,
+        width: Math.max(width, MIN_WINDOW_WIDTH),
+        height: Math.max(height, MIN_WINDOW_HEIGHT),
+      },
+    });
+    await cdp.send("Browser.setWindowBounds", {
+      windowId,
+      bounds: { windowState: "normal" },
     });
   }
   const after = await cdp

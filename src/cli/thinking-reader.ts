@@ -32,6 +32,7 @@ export async function readThinkingContent(config: RunConfig): Promise<string> {
         shouldClose = false;
         page = await createHiddenPage(browser, config.runId, {
           allowVisible: false,
+          browserPid: connection.browserPid,
         });
       } else {
         const connection = await launchFirefox({

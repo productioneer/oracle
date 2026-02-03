@@ -121,7 +121,7 @@ test('full lifecycle: no focus theft and window stays hidden', async () => {
     oracleUserDataDir: TEMP_PROFILE,
     telemetry,
   });
-  const windowObserver = new WindowObserver({ intervalMs: 300, telemetry });
+  let windowObserver;
 
   try {
     // 1. Start mock server
@@ -139,15 +139,15 @@ test('full lifecycle: no focus theft and window stays hidden', async () => {
     browser = connection.browser;
     browserPid = connection.browserPid;
 
-    // 4. Create hidden page (this triggers ensureChromeWindowHidden)
+    // 4. Create hidden page (this triggers ensureChromeWindowHidden + AppleScript hide)
     const page = await createHiddenPage(browser, 'monitor-integ-test', {
       allowVisible: false,
+      browserPid,
     });
 
-    // 5. Start window observer after hiding is complete. Note: Chrome may be
-    //    briefly at non-hidden coordinates during startup (before createHiddenPage
-    //    calls ensureChromeWindowHidden), but the -g launch flag keeps it in
-    //    background so it's not user-visible. This tests steady-state behavior.
+    // 5. Start window observer after hiding is complete. Pass browserPid so the
+    //    observer can check macOS app-level visibility (AppleScript-based hiding).
+    windowObserver = new WindowObserver({ intervalMs: 300, telemetry, browserPid });
     await windowObserver.start(browser);
 
     // 6. Navigate to mock ChatGPT
@@ -206,7 +206,7 @@ test('full lifecycle: no focus theft and window stays hidden', async () => {
   } finally {
     // Cleanup
     focusMonitor.stop();
-    try { await windowObserver.stop(); } catch { /* already stopped */ }
+    if (windowObserver) { try { await windowObserver.stop(); } catch { /* already stopped */ } }
     await telemetry.close();
 
     if (browser) {

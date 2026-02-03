@@ -187,6 +187,7 @@ async function runAttempt(
       await saveRunConfig(config.runPath, config);
       page = await createHiddenPage(browser, config.runId, {
         allowVisible: config.allowVisible,
+        browserPid: config.browserPid,
         logger,
       });
     } else {
@@ -652,6 +653,7 @@ async function runAttempt(
           config.browser === "chrome"
             ? await createHiddenPage(browser, config.runId, {
                 allowVisible: config.allowVisible,
+                browserPid: config.browserPid,
                 logger,
               })
             : await (async () => {

@@ -2,6 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { WindowObserver } = require('../dist/monitor/window-observer.js');
 const { launchChrome, createHiddenPage } = require('../dist/browser/chrome.js');
+const { execFile } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -26,10 +27,11 @@ test('window observer detects hidden Chrome window state', async () => {
     // Create a hidden page (this triggers window hiding)
     const page = await createHiddenPage(browser, 'window-observer-test', {
       allowVisible: false,
+      browserPid,
     });
 
-    // Start the observer
-    const observer = new WindowObserver({ intervalMs: 300 });
+    // Start the observer (with browserPid for macOS visibility detection)
+    const observer = new WindowObserver({ intervalMs: 300, browserPid });
     await observer.start(browser);
 
     // Wait for at least one poll
@@ -53,11 +55,13 @@ test('window observer detects hidden Chrome window state', async () => {
     assert.ok(first.timestamp, 'Should have a timestamp');
     assert.equal(first.visible, false, 'Window should not be visible');
 
-    // Window should be either minimized or parked far offscreen (Oracle uses -32000)
-    const isMinimized = first.windowState === 'minimized';
-    const isOffscreen = first.left <= -10000 && first.top <= -10000;
-    assert.ok(isMinimized || isOffscreen,
-      `Window should be minimized or offscreen, got state=${first.windowState} left=${first.left} top=${first.top}`);
+    // Oracle requests -32000,-32000 but macOS clamps to the monitor boundary
+    // (around -3960 on a typical setup). The window should be at a negative
+    // position — the exact value depends on the display layout, but it should
+    // be well below zero on at least one axis.
+    const isOffscreen = first.left < -1000 || first.top < -1000;
+    assert.ok(isOffscreen,
+      `Window should be parked offscreen, got left=${first.left} top=${first.top}`);
   } finally {
     if (browser) {
       try {
@@ -96,9 +100,10 @@ test('window observer detects violation when window is un-hidden via CDP', async
 
     const page = await createHiddenPage(browser, 'window-positive-test', {
       allowVisible: false,
+      browserPid,
     });
 
-    const observer = new WindowObserver({ intervalMs: 200 });
+    const observer = new WindowObserver({ intervalMs: 200, browserPid });
     await observer.start(browser);
 
     // Wait for initial hidden state to be recorded
@@ -117,14 +122,28 @@ test('window observer detects violation when window is un-hidden via CDP', async
     });
     assert.ok(windowInfo?.windowId, 'Should have a window ID');
 
+    // Un-hide Chrome via AppleScript (undo the app-level hiding from createHiddenPage).
+    // Without this, the observer's macOS visibility check still sees the app as hidden
+    // and won't flag the CDP position change as a violation.
+    await new Promise((resolve) => {
+      execFile('osascript', [
+        '-e', 'tell application "System Events"',
+        '-e', `set matches to (every process whose unix id is ${browserPid})`,
+        '-e', 'if (count of matches) = 0 then return "missing"',
+        '-e', 'set visible of item 1 of matches to true',
+        '-e', 'end tell',
+      ], { timeout: 2000 }, resolve);
+    });
+
     // Move window onscreen — this should trigger a violation
     await cdp.send('Browser.setWindowBounds', {
       windowId: windowInfo.windowId,
       bounds: { left: 100, top: 100, windowState: 'normal' },
     });
 
-    // Wait for observer to detect the change
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    // Wait for observer's macOS visibility check cycle (2s) to detect un-hiding,
+    // plus a CDP poll cycle to see the new bounds with macAppHidden=false.
+    await new Promise((resolve) => setTimeout(resolve, 3000));
 
     const report = await observer.stop();
     await cdp.detach().catch(() => null);
