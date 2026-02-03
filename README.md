@@ -46,10 +46,10 @@ Start the mock server:
 node scripts/mock-server.js --port 7777
 ```
 
-Use it as the base URL:
+Use it as the base URL (requires `ORACLE_DEV=1` for localhost URLs):
 
 ```bash
-node dist/cli.js run "Hello" --base-url http://127.0.0.1:7777/
+ORACLE_DEV=1 node dist/cli.js run "Hello" --base-url http://127.0.0.1:7777/
 ```
 
 Simulate long wait / stuck streaming:
@@ -62,9 +62,9 @@ You can set `ORACLE_DEV=1` to expose `--timeout-ms` for long-run testing.
 
 ## Notes
 
-- Chrome focus-safe launch uses `open -n -g` and `--no-startup-window` with hidden CDP targets.
+- Chrome focus-safe launch uses `open -n -g` with offscreen window positioning (`--window-position=-32000,-32000`) plus AppleScript hiding.
 - Default effort is Extended; use `--effort standard` to override.
-- Firefox support uses Puppeteer WebDriver BiDi (headful). Focus prevention is best-effort.
+- Firefox support uses Playwright (headful, WebDriver BiDi protocol). Focus prevention is best-effort.
 - On macOS, Firefox automation requires Firefox Developer Edition or Nightly (distinct bundle ID) to avoid controlling your personal Firefox. Install one or pass `--firefox-app /Applications/Firefox\ Developer\ Edition.app` (or set `ORACLE_FIREFOX_APP`). Keep that app reserved for Oracle; if its window title doesn't match the Oracle automation homepage, focus suppression is skipped to avoid touching personal windows.
 - Firefox focus on macOS uses an AppleScript ladder (background launch → hide → minimize). If permissions are blocked, the window may stay visible and `status.json` will include a `focus` section with `state` and `needsUser` details.
 - Firefox on macOS runs a setup-first phase before any tab work: profile window size is pre-set to a tiny setup size, then the window is hidden/minimized, waits briefly, and only then resizes to a normal working size before navigation.
@@ -77,7 +77,7 @@ You can set `ORACLE_DEV=1` to expose `--timeout-ms` for long-run testing.
 - If `needs_user: kill_chrome` is set, resume with `oracle resume <run_id> --allow-kill` after reviewing the prompt.
 - Use `--focus-only` to test Firefox focus suppression without navigating to ChatGPT. Focus-only runs do not pool Firefox; the automation instance is closed after each run.
 - Debug artifacts (HTML/PNG) are written to `~/.oracle/runs/<run_id>/debug` when prompt input fails or when running against localhost.
-- If Chrome is stuck and you pass `--allow-kill`, Oracle requests graceful shutdown first (waits ~10s) before force killing the automation Chrome.
+- If Chrome is stuck and you pass `--allow-kill`, Oracle requests graceful shutdown first (SIGTERM, waits ~10s). If Chrome doesn't exit, set `ORACLE_FORCE_KILL=1` to enable SIGKILL.
 
 ## Development
 

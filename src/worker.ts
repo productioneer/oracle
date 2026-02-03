@@ -830,6 +830,21 @@ async function attemptRecovery(
     return false;
   }
 
+  // Require allowKill for automation Chrome restart FIRST (DNA: user coordination)
+  // Check before personal Chrome approval to avoid confusing prompts
+  if (!config.allowKill) {
+    await writeNeedsUser(
+      config,
+      "kill_chrome",
+      "Chrome stuck; restart approval required (resume with --allow-kill)",
+      "recovery",
+    );
+    throw new NeedsUserError(
+      "kill_chrome",
+      "Chrome restart requires --allow-kill",
+    );
+  }
+
   const oracleUserDataDir = oracleChromeDataDir();
   const personalRunning = allowPersonalRestart
     ? await isPersonalChromeRunning(oracleUserDataDir)
@@ -869,6 +884,7 @@ async function attemptRecovery(
       return true;
     }
   }
+
   await writeStatus(
     config,
     "running",

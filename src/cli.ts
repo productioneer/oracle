@@ -140,7 +140,14 @@ runCommand.action(async (args, options) => {
   if (existing) {
     const status = await readStatusMaybe(runDirPath);
     if (status) {
-      await waitForNeedsUserResolution(runId, runDirPath, status);
+      // Skip needs_user wait if override addresses it
+      const canResolve =
+        (options.allowKill && status.needs?.type === "kill_chrome") ||
+        (options.allowVisible &&
+          ["login", "cloudflare"].includes(status.needs?.type ?? ""));
+      if (!canResolve) {
+        await waitForNeedsUserResolution(runId, runDirPath, status);
+      }
     }
   }
   await ensureDir(runDirPath);
@@ -431,13 +438,7 @@ program
   .action(async (runId, options) => {
     await cleanupRuns(options.runsRoot);
     const runDirPath = await requireRunDir(runId, options.runsRoot);
-    const initialStatus = await readStatusMaybe(runDirPath);
-    const status = initialStatus
-      ? await waitForNeedsUserResolution(runId, runDirPath, initialStatus)
-      : null;
-    if (status && ["completed", "failed", "canceled"].includes(status.state)) {
-      throw new Error(`run ${runId} already ${status.state}`);
-    }
+    // Apply overrides FIRST so worker can use them for recovery
     if (options.allowVisible || options.allowKill) {
       const config = await readJson<RunConfig>(runConfigPath(runDirPath));
       applyRunOverrides(config, {
@@ -445,6 +446,19 @@ program
         allowKill: options.allowKill ? true : undefined,
       });
       await saveRunConfig(config.runPath, config);
+    }
+    const initialStatus = await readStatusMaybe(runDirPath);
+    // Skip needs_user wait if override addresses it
+    const canResolve =
+      (options.allowKill && initialStatus?.needs?.type === "kill_chrome") ||
+      (options.allowVisible &&
+        ["login", "cloudflare"].includes(initialStatus?.needs?.type ?? ""));
+    const status =
+      initialStatus && !canResolve
+        ? await waitForNeedsUserResolution(runId, runDirPath, initialStatus)
+        : initialStatus;
+    if (status && ["completed", "failed", "canceled"].includes(status.state)) {
+      throw new Error(`run ${runId} already ${status.state}`);
     }
     await spawnWorker(runDirPath);
     // eslint-disable-next-line no-console
@@ -544,17 +558,24 @@ program
         config.debugPort = await getFreePort();
         await saveRunConfig(config.runPath, config);
       }
-      const status = initialStatus
-        ? await waitForNeedsUserResolution(runId, runDirPath, initialStatus)
-        : null;
-      const conversation = await waitForConversationUrl(
-        runId,
-        runDirPath,
-        config,
-        status,
-      );
-      assertValidUrl(conversation.url, "conversation URL");
-      const targetUrl = conversation.url;
+      // open is for manual intervention — skip needs_user wait
+      // Fall back to base URL only for needs_user states (login/recovery)
+      let targetUrl: string;
+      if (initialStatus?.state === "needs_user") {
+        // Needs manual intervention — open base URL for login/recovery
+        targetUrl =
+          initialStatus.conversationUrl ?? config.conversationUrl ?? config.baseUrl;
+      } else {
+        const conversation = await waitForConversationUrl(
+          runId,
+          runDirPath,
+          config,
+          initialStatus,
+          { skipNeedsUserWait: true },
+        );
+        targetUrl = conversation.url;
+      }
+      assertValidUrl(targetUrl, "target URL");
       await openVisible(config, targetUrl);
       // eslint-disable-next-line no-console
       console.log(`Opened browser for ${runId}`);
@@ -892,12 +913,13 @@ async function waitForConversationUrl(
   runDirPath: string,
   config: RunConfig,
   status: StatusPayload | null,
+  options: { skipNeedsUserWait?: boolean } = {},
 ): Promise<{ url: string; status: StatusPayload | null }> {
   const start = Date.now();
   let latestStatus = status;
   let latestConfig = config;
   while (Date.now() - start < CONVERSATION_URL_WAIT_MS) {
-    if (latestStatus?.state === "needs_user") {
+    if (latestStatus?.state === "needs_user" && !options.skipNeedsUserWait) {
       latestStatus = await waitForNeedsUserResolution(
         runId,
         runDirPath,

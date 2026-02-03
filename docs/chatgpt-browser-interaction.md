@@ -106,7 +106,7 @@ After typing, verify the prompt was entered correctly:
 
 1. **Click**: `[data-testid='composer-plus-btn']`
 2. **Wait for & Click**: File upload option (`::-p-text(Add photos &)` in the menu)
-3. **Fill**: `div.pointer-events-auto input` (single file input on page)
+3. **Fill**: `div.pointer-events-auto input[type="file"]` (single file input on page)
 4. **Wait for file accepted**: `aria/Remove file` button appears
 5. **Wait for upload complete**:
    - **Uploading**: SVG contains `<circle>` elements (animated spinner)
@@ -187,7 +187,7 @@ Elements have primary and secondary selectors for robustness. Use both; error if
 | Thinking dropdown options | `[role="menuitemradio"]` | containing text "Standard" or "Extended" |
 | Attachments button | `[data-testid='composer-plus-btn']` | `button[aria-label*="Add files"]` |
 | File upload option | — | text "Add photos &" in menu |
-| File input | — | `input[type="file"]` (single on page) |
+| File input | `div.pointer-events-auto input[type="file"]` | `input[type="file"]` (single on page) |
 | File accepted indicator | — | `button[aria-label="Remove file"]` |
 | Send button | `[data-testid='send-button']` | `button[aria-label*="Send"]` |
 | Conversation turn | `[data-testid='conversation-turn-{N}']` | — |

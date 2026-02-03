@@ -132,7 +132,6 @@ export async function ensureChatGptReady(
     { timeoutMs: 15_000 },
   );
   const hasNewChat = await selectorExists(page, SELECTOR_PAIRS.newChat, logger, {
-    requireText: "new chat",
     timeoutMs: 15_000,
   });
 
