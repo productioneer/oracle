@@ -222,17 +222,20 @@ function buildHtml() {
 
     let messageIndex = 0;
     function appendMessage(role, text) {
-      const div = document.createElement('div');
-      div.className = 'msg ' + role;
-      div.setAttribute('data-message-author-role', role);
-      const article = document.createElement('article');
+      // Structure matches real ChatGPT: conversation-turn wrapper > role div > article
       messageIndex += 1;
-      article.setAttribute('data-testid', 'conversation-turn-' + messageIndex);
+      const wrapper = document.createElement('div');
+      wrapper.setAttribute('data-testid', 'conversation-turn-' + messageIndex);
+      wrapper.className = 'msg ' + role;
+      const roleDiv = document.createElement('div');
+      roleDiv.setAttribute('data-message-author-role', role);
+      const article = document.createElement('article');
       article.innerText = text;
-      div.appendChild(article);
-      messages.appendChild(div);
-      div.scrollIntoView();
-      return { container: div, article };
+      roleDiv.appendChild(article);
+      wrapper.appendChild(roleDiv);
+      messages.appendChild(wrapper);
+      wrapper.scrollIntoView();
+      return { container: wrapper, article };
     }
 
     function simulateStreaming(prompt) {
