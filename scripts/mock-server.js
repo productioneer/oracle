@@ -1,27 +1,30 @@
 #!/usr/bin/env node
-const http = require('http');
-const { URL } = require('url');
+const http = require("http");
+const { URL } = require("url");
 
 const args = process.argv.slice(2);
-const port = getArgValue(args, '--port') ? Number(getArgValue(args, '--port')) : 7777;
-const once = args.includes('--once');
+const port = getArgValue(args, "--port")
+  ? Number(getArgValue(args, "--port"))
+  : 7777;
+const once = args.includes("--once");
 
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url || '/', `http://${req.headers.host}`);
-  if (url.pathname !== '/') {
+  const url = new URL(req.url || "/", `http://${req.headers.host}`);
+  // Accept root and /c/* paths (conversation URLs)
+  if (url.pathname !== "/" && !url.pathname.startsWith("/c/")) {
     res.writeHead(404);
-    res.end('not found');
+    res.end("not found");
     return;
   }
   const html = buildHtml();
-  res.writeHead(200, { 'Content-Type': 'text/html' });
+  res.writeHead(200, { "Content-Type": "text/html" });
   res.end(html);
   if (once) {
     setTimeout(() => server.close(), 500);
   }
 });
 
-server.listen(port, '127.0.0.1', () => {
+server.listen(port, "127.0.0.1", () => {
   // eslint-disable-next-line no-console
   console.log(`Mock ChatGPT listening on http://127.0.0.1:${port}`);
 });
@@ -33,14 +36,21 @@ function buildHtml() {
   <meta charset="utf-8" />
   <title>Mock ChatGPT</title>
   <style>
-    body { font-family: ui-sans-serif, system-ui; margin: 20px; }
+    body { font-family: ui-sans-serif, system-ui; margin: 0; padding: 0; }
+    #page-header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid #eee; }
+    #page-header span { font-weight: 600; }
+    .model-dropdown { display: none; border: 1px solid #ddd; padding: 6px; border-radius: 6px; position: absolute; background: #fff; z-index: 10; }
+    .model-dropdown button { display: block; width: 100%; text-align: left; padding: 6px 8px; }
+    .content { padding: 20px; }
     .messages { max-width: 800px; margin-bottom: 20px; }
     .msg { padding: 12px; border-radius: 8px; margin: 8px 0; }
     .user { background: #f0f4ff; }
     .assistant { background: #f7f7f7; }
+    .turn-actions { margin-top: 4px; display: flex; gap: 4px; }
+    .turn-actions button { font-size: 12px; padding: 2px 6px; }
     .controls { display: flex; gap: 8px; align-items: flex-start; }
     textarea { width: 100%; height: 80px; }
-    button { padding: 8px 12px; }
+    button { padding: 8px 12px; cursor: pointer; }
     .actions { margin-top: 8px; display: flex; gap: 8px; }
     .thinking { border: 1px solid #ddd; padding: 10px; border-radius: 8px; margin-top: 16px; max-width: 800px; }
     .thinking-header { font-weight: 600; cursor: pointer; }
@@ -49,41 +59,65 @@ function buildHtml() {
     .composer-footer { margin-top: 8px; }
     .menu { border: 1px solid #ddd; padding: 6px; border-radius: 6px; display: none; margin-top: 4px; }
     .menu button { display: block; width: 100%; text-align: left; }
+    .attachment-area { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .file-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: #f0f0f0; border-radius: 4px; font-size: 13px; }
+    .file-chip svg { width: 16px; height: 16px; }
+    .upload-input { display: none; }
   </style>
 </head>
 <body>
-  <main class="messages" id="messages"></main>
-
-  <div class="actions">
-    <button id="action-good" data-testid="good-response-turn-action-button" style="display:none;">👍</button>
-    <button id="action-bad" data-testid="bad-response-turn-action-button" style="display:none;">👎</button>
-  </div>
-
-  <div class="controls">
-    <textarea id="prompt-textarea" placeholder="Message ChatGPT"></textarea>
-    <button id="send" data-testid="send-button" aria-label="Send">Send</button>
-    <button id="stop" aria-label="Stop" style="display:none;">Stop</button>
-  </div>
-
-  <div class="composer-footer" data-testid="composer-footer-actions">
-    <button id="thinking-toggle">Extended thinking</button>
-    <div id="thinking-menu" class="menu">
-      <button role="menuitemradio" data-value="standard">Standard</button>
-      <button role="menuitemradio" data-value="extended">Extended</button>
+  <div id="page-header">
+    <a data-testid="create-new-chat-button" href="/">New chat</a>
+    <div style="position: relative;">
+      <button data-testid="model-switcher-dropdown-button" aria-label="Model selector">
+        <span>5.2 Pro</span>
+      </button>
+      <div id="model-dropdown" class="model-dropdown">
+        <button data-testid="model-switcher-gpt-5-2-pro">5.2 Pro</button>
+      </div>
     </div>
   </div>
 
-  <div class="thinking" id="thinking-panel">
-    <div id="thought-header" class="thinking-header">Thought for 12 seconds</div>
-    <div id="thinking-content" class="thinking-content collapsed">
-      <section id="pro-thinking-section">
-        <div id="pro-thinking-header">Pro thinking</div>
-        <div id="pro-thinking-body"></div>
-      </section>
-      <section id="sources-section">
-        <div data-testid="bar-search-sources-header" id="sources-header">Sources</div>
-        <div id="sources-body">example.com</div>
-      </section>
+  <div class="content">
+    <main class="messages" id="messages"></main>
+
+    <div class="actions">
+      <button id="action-good" data-testid="good-response-turn-action-button" style="display:none;">👍</button>
+      <button id="action-bad" data-testid="bad-response-turn-action-button" style="display:none;">👎</button>
+    </div>
+
+    <div id="thread-bottom-container">
+      <div class="attachment-area" id="attachment-area"></div>
+      <div class="controls">
+        <button data-testid="composer-plus-btn" aria-label="Add files" id="plus-btn">+</button>
+        <input type="file" id="file-input" class="upload-input" multiple />
+        <textarea id="prompt-textarea" placeholder="Message ChatGPT"></textarea>
+        <button id="send" data-testid="send-button" aria-label="Send">Send</button>
+        <button id="stop" aria-label="Stop" style="display:none;">Stop</button>
+      </div>
+    </div>
+
+    <div class="composer-footer" data-testid="composer-footer-actions">
+      <button id="thinking-toggle" aria-label="Extended thinking">Extended thinking</button>
+      <div id="thinking-menu" class="menu">
+        <button role="menuitemradio" data-value="standard">Standard</button>
+        <button role="menuitemradio" data-value="extended">Extended</button>
+      </div>
+    </div>
+
+    <div class="thinking" id="thinking-panel">
+      <div id="thought-header" class="thinking-header">Thought for 12 seconds</div>
+      <button data-testid="close-button" id="thinking-close" style="float:right;font-size:12px;">Close</button>
+      <div id="thinking-content" class="thinking-content collapsed">
+        <section id="pro-thinking-section">
+          <div id="pro-thinking-header">Pro thinking</div>
+          <div id="pro-thinking-body"></div>
+        </section>
+        <section id="sources-section">
+          <div data-testid="bar-search-sources-header" id="sources-header">Sources</div>
+          <div id="sources-body">example.com</div>
+        </section>
+      </div>
     </div>
   </div>
 
@@ -98,7 +132,13 @@ function buildHtml() {
     const thinkingMenu = document.getElementById('thinking-menu');
     const thoughtHeader = document.getElementById('thought-header');
     const thinkingContent = document.getElementById('thinking-content');
+    const thinkingClose = document.getElementById('thinking-close');
     const proThinkingBody = document.getElementById('pro-thinking-body');
+    const modelSwitcher = document.querySelector('[data-testid="model-switcher-dropdown-button"]');
+    const modelDropdown = document.getElementById('model-dropdown');
+    const plusBtn = document.getElementById('plus-btn');
+    const fileInput = document.getElementById('file-input');
+    const attachmentArea = document.getElementById('attachment-area');
 
     send.addEventListener('click', () => startRun());
     input.addEventListener('keydown', (event) => {
@@ -108,6 +148,18 @@ function buildHtml() {
       }
     });
 
+    // Model switcher
+    modelSwitcher.addEventListener('click', () => {
+      modelDropdown.style.display = modelDropdown.style.display === 'block' ? 'none' : 'block';
+    });
+    modelDropdown.addEventListener('click', (event) => {
+      if (event.target.hasAttribute('data-testid')) {
+        modelSwitcher.querySelector('span').textContent = event.target.textContent;
+        modelDropdown.style.display = 'none';
+      }
+    });
+
+    // Thinking toggle
     thinkingToggle.addEventListener('click', () => {
       thinkingMenu.style.display = thinkingMenu.style.display === 'block' ? 'none' : 'block';
     });
@@ -118,15 +170,47 @@ function buildHtml() {
       const value = target.getAttribute('data-value');
       if (value === 'extended') {
         thinkingToggle.textContent = 'Extended thinking';
+        thinkingToggle.setAttribute('aria-label', 'Extended thinking');
       } else {
         thinkingToggle.textContent = 'Pro';
+        thinkingToggle.setAttribute('aria-label', 'Pro');
       }
       thinkingMenu.style.display = 'none';
     });
 
+    // Thinking panel
     thoughtHeader.addEventListener('click', () => {
       thinkingContent.classList.toggle('collapsed');
     });
+    thinkingClose.addEventListener('click', () => {
+      thinkingContent.classList.add('collapsed');
+    });
+
+    // File attachments
+    plusBtn.addEventListener('click', () => {
+      fileInput.click();
+    });
+    fileInput.addEventListener('change', () => {
+      for (const file of fileInput.files) {
+        addFileChip(file.name);
+      }
+      fileInput.value = '';
+    });
+
+    function addFileChip(filename) {
+      const chip = document.createElement('span');
+      chip.className = 'file-chip';
+      chip.innerHTML =
+        '<svg><use href="https://cdn.example.com/sprite.svg#file-icon"></use></svg>' +
+        '<span>' + filename + '</span>';
+      const removeBtn = document.createElement('button');
+      removeBtn.setAttribute('aria-label', 'Remove file');
+      removeBtn.textContent = '×';
+      removeBtn.style.cssText = 'border:none;background:none;cursor:pointer;padding:0 2px;';
+      removeBtn.addEventListener('click', () => chip.remove());
+      chip.appendChild(removeBtn);
+      attachmentArea.appendChild(chip);
+    }
 
     function startRun() {
       const prompt = input.value.trim();
@@ -148,7 +232,7 @@ function buildHtml() {
       div.appendChild(article);
       messages.appendChild(div);
       div.scrollIntoView();
-      return article;
+      return { container: div, article };
     }
 
     function simulateStreaming(prompt) {
@@ -158,7 +242,7 @@ function buildHtml() {
       const stall = params.get('stall') === '1';
       const response = 'Echo: ' + prompt + '\\n\\nThis is a mocked streaming response.';
       const delay = durationMs ? Math.max(10, Math.floor(durationMs / response.length)) : delayMsParam;
-      const article = appendMessage('assistant', '');
+      const { container, article } = appendMessage('assistant', '');
       stop.style.display = 'inline-block';
       actionGood.style.display = 'none';
       actionBad.style.display = 'none';
@@ -174,6 +258,15 @@ function buildHtml() {
           stop.style.display = 'none';
           actionGood.style.display = 'inline-block';
           actionBad.style.display = 'inline-block';
+          // Add copy button (completion signal)
+          const turnActions = document.createElement('div');
+          turnActions.className = 'turn-actions';
+          const copyBtn = document.createElement('button');
+          copyBtn.setAttribute('data-testid', 'copy-turn-action-button');
+          copyBtn.setAttribute('aria-label', 'Copy');
+          copyBtn.textContent = 'Copy';
+          turnActions.appendChild(copyBtn);
+          container.appendChild(turnActions);
         }
       }, delay);
     }
