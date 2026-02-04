@@ -38,6 +38,7 @@
 5. **Turn structure with thinking** (Block 7, commit 1381019): ChatGPT inserts intermediate "thinking" turns (no `data-message-author-role`) between user and assistant turns. Fix: forward scan up to 3 turns in `getCompletionSnapshot()`, simplified `getNextUserTurnNumber()` to `max + 1`.
 6. **Paste-based text entry** (Block 7, commit 1381019): Synthetic `ClipboardEvent` paste for instant text entry into ProseMirror. Keyboard typing (with Shift+Enter for newlines) kept as fallback. Critical for inlined file content.
 7. **Enter vs Shift+Enter** (Block 7, commit 1381019): ProseMirror maps Enter to "submit message". Newlines must use Shift+Enter.
+8. **Personal Chrome isolation** (Block 9-10, commit 0af5f9b + a13bd0a): System Events `set visible` hides ALL Chrome instances. Fix: window-level hiding via Chrome's AppleScript dictionary (`visible of window`), targeting by offscreen position. Also: WindowObserver threshold/logic, FocusMonitor PID scoping, PID-targeted attachments.ts, test segregation (test:safe/test:chrome).
 
 ### Remaining Gaps (Priority Order)
 
@@ -104,8 +105,8 @@
 ## Final Autonomous Status (Block 7)
 
 All autonomous (Category A/B) work is complete. P1 production verification also complete:
-- **Commits**: 24 commits (latest: 1381019 — paste input + turn scanning)
-- **Tests**: 75/77 pass (2 pre-existing focus monitor flakiness — macOS timing)
+- **Commits**: 27 commits (latest: a13bd0a — window-level Chrome isolation)
+- **Tests**: 77/77 pass (73 safe + 4 Chrome integration)
 - **TypeScript**: Compiles cleanly, zero errors
 - **Agent eval**: Claude eval passes (79s, 3 commands, optimal path)
 - **Production verification**: 4/4 tests passed against real ChatGPT with human observing
