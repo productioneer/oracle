@@ -60,7 +60,7 @@ test('status errors when run missing', () => {
   const root = makeRunRoot('oracle-status-missing-');
   const res = runCli(['status', 'missing-run', '--runs-root', root]);
   assert.equal(res.status, 1);
-  assert.ok(res.stderr.includes('run not found'));
+  assert.ok(res.stderr.includes('Run not found'));
 });
 
 test('status errors when status missing', () => {
@@ -68,7 +68,7 @@ test('status errors when status missing', () => {
   writeRunConfig(root, 'abc123-def456');
   const res = runCli(['status', 'abc123-def456', '--runs-root', root]);
   assert.equal(res.status, 1);
-  assert.ok(res.stderr.includes('status not available'));
+  assert.ok(res.stderr.includes('Status not available'));
 });
 
 test('status waits for needs_user to resolve', async () => {
@@ -121,7 +121,7 @@ test('result errors when missing', () => {
   writeRunConfig(root, 'abc123-def456');
   const res = runCli(['result', 'abc123-def456', '--runs-root', root]);
   assert.equal(res.status, 1);
-  assert.ok(res.stderr.includes('result not available'));
+  assert.ok(res.stderr.includes('Result not available'));
 });
 
 test('thinking errors when conversation missing', () => {
@@ -136,7 +136,7 @@ test('thinking errors when conversation missing', () => {
   });
   const res = runCli(['thinking', 'abc123-def456', '--runs-root', root]);
   assert.equal(res.status, 1);
-  assert.ok(res.stderr.includes('thinking not available'));
+  assert.ok(res.stderr.includes('Thinking not available'));
 });
 
 test('resume errors when run completed', () => {
@@ -201,4 +201,71 @@ test('run errors on missing prompt file', () => {
   );
   assert.equal(res.status, 1);
   assert.ok(res.stderr.includes('Prompt file not found'));
+});
+
+// --- JSON error output tests ---
+
+test('run --json outputs structured JSON error on missing prompt', () => {
+  const root = makeRunRoot('oracle-json-err-noprompt-');
+  const res = runCli(['run', '--json', '--runs-root', root]);
+  assert.equal(res.status, 1);
+  const parsed = JSON.parse(res.stdout.trim());
+  assert.equal(parsed.error, true);
+  assert.equal(parsed.code, 'PROMPT_REQUIRED');
+  assert.ok(parsed.message.includes('No prompt provided'));
+  assert.ok(parsed.suggestion);
+});
+
+test('status --json outputs structured JSON error on missing run', () => {
+  const root = makeRunRoot('oracle-json-err-status-');
+  const res = runCli(['status', 'missing-run', '--runs-root', root, '--json']);
+  assert.equal(res.status, 1);
+  const parsed = JSON.parse(res.stdout.trim());
+  assert.equal(parsed.error, true);
+  assert.equal(parsed.code, 'RUN_NOT_FOUND');
+  assert.ok(parsed.message.includes('Run not found'));
+});
+
+test('result --json outputs structured JSON error on missing run', () => {
+  const root = makeRunRoot('oracle-json-err-result-');
+  const res = runCli(['result', 'missing-run', '--runs-root', root, '--json']);
+  assert.equal(res.status, 1);
+  const parsed = JSON.parse(res.stdout.trim());
+  assert.equal(parsed.error, true);
+  assert.equal(parsed.code, 'RUN_NOT_FOUND');
+});
+
+test('cancel --json outputs structured JSON error on completed run', () => {
+  const root = makeRunRoot('oracle-json-err-cancel-');
+  const { runDir: rDir } = writeRunConfig(root, 'abc123-def456');
+  writeStatus(rDir, {
+    runId: 'abc123-def456',
+    state: 'completed',
+    stage: 'cleanup',
+    updatedAt: new Date().toISOString(),
+    attempt: 1,
+  });
+  const res = runCli(['cancel', 'abc123-def456', '--runs-root', root, '--json']);
+  assert.equal(res.status, 1);
+  const parsed = JSON.parse(res.stdout.trim());
+  assert.equal(parsed.error, true);
+  assert.equal(parsed.code, 'RUN_TERMINAL');
+  assert.ok(parsed.message.includes('already completed'));
+});
+
+test('cancel --json outputs success on active run', () => {
+  const root = makeRunRoot('oracle-json-cancel-ok-');
+  const { runDir: rDir } = writeRunConfig(root, 'abc123-def456');
+  writeStatus(rDir, {
+    runId: 'abc123-def456',
+    state: 'running',
+    stage: 'waiting',
+    updatedAt: new Date().toISOString(),
+    attempt: 1,
+  });
+  const res = runCli(['cancel', 'abc123-def456', '--runs-root', root, '--json']);
+  assert.equal(res.status, 0);
+  const parsed = JSON.parse(res.stdout.trim());
+  assert.equal(parsed.run_id, 'abc123-def456');
+  assert.equal(parsed.canceled, true);
 });

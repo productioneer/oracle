@@ -49,6 +49,20 @@ const PROMPT_SUBMIT_WAIT_MS = 60_000;
 const PROMPT_SUBMIT_POLL_MS = 500;
 const RUNS_TTL_MS = 48 * 60 * 60 * 1000;
 
+// --- Structured error support ---
+
+class OracleError extends Error {
+  public readonly code: string;
+  public readonly suggestion?: string;
+  constructor(code: string, message: string, suggestion?: string) {
+    super(message);
+    this.code = code;
+    this.suggestion = suggestion;
+  }
+}
+
+let jsonMode = false;
+
 const argv = [...process.argv];
 const helpDevIndex = argv.indexOf("--help-dev");
 if (helpDevIndex !== -1) {
@@ -130,6 +144,7 @@ if (DEV_MODE) {
 }
 
 runCommand.action(async (args, options) => {
+  jsonMode = Boolean(options.json);
   await cleanupRuns(options.runsRoot);
   const {
     runId,
@@ -296,6 +311,7 @@ program
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .option("--json", "Output JSON", false)
   .action(async (runId, options) => {
+    jsonMode = Boolean(options.json);
     await cleanupRuns(options.runsRoot);
     const { runDirPath, status: initialStatus } = await loadStatusForRun(
       runId,
@@ -323,6 +339,7 @@ program
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
   .option("--json", "Output JSON metadata", false)
   .action(async (runId, options) => {
+    jsonMode = Boolean(options.json);
     await cleanupRuns(options.runsRoot);
     const runDirPath = await requireRunDir(runId, options.runsRoot);
     const jsonPath = resultJsonPath(runDirPath);
@@ -340,14 +357,20 @@ program
         const latestStatus = await readStatusMaybe(runDirPath);
         const state = latestStatus?.state ?? "unknown";
         const stage = latestStatus?.stage ?? "unknown";
-        throw new Error(
-          `result not available for run ${runId} (state=${state}, stage=${stage})`,
+        throw new OracleError(
+          "RESULT_NOT_AVAILABLE",
+          `Result not available yet for run ${runId} (state=${state}, stage=${stage}). The run may still be in progress.`,
+          `Wait for completion with "oracle watch ${runId}", or check status with "oracle status ${runId}"`,
         );
       }
     }
     if (options.json) {
       if (!(await pathExists(jsonPath))) {
-        throw new Error(`result metadata not available for run ${runId}`);
+        throw new OracleError(
+          "RESULT_NOT_AVAILABLE",
+          `Result metadata not available for run ${runId}. The run may not have completed yet.`,
+          `Wait with "oracle watch ${runId}" or check "oracle status ${runId}"`,
+        );
       }
       const result = await readJson<ResultPayload>(jsonPath);
       writeJson(result);
@@ -378,7 +401,11 @@ program
       console.log(resultPayload.content);
       return;
     }
-    throw new Error(`result content missing for run ${runId}`);
+    throw new OracleError(
+      "RESULT_EMPTY",
+      `Result content missing for run ${runId}. The run completed but produced no output — this is unusual and may indicate a browser extraction failure.`,
+      `Check "oracle result ${runId} --json" for error details`,
+    );
   });
 
 program
@@ -407,8 +434,10 @@ program
     if (!conversationUrl) {
       const state = status?.state ?? "unknown";
       const stage = status?.stage ?? "unknown";
-      throw new Error(
-        `thinking not available for run ${runId} (state=${state}, stage=${stage})`,
+      throw new OracleError(
+        "THINKING_NOT_AVAILABLE",
+        `Thinking not available for run ${runId} (state=${state}, stage=${stage}). The run may not have started reasoning yet — ChatGPT needs to begin processing before thinking output is available.`,
+        `Wait for the run to start with "oracle watch ${runId}" first, then retry`,
       );
     }
     config.conversationUrl = conversationUrl;
@@ -458,7 +487,11 @@ program
         ? await waitForNeedsUserResolution(runId, runDirPath, initialStatus)
         : initialStatus;
     if (status && ["completed", "failed", "canceled"].includes(status.state)) {
-      throw new Error(`run ${runId} already ${status.state}`);
+      throw new OracleError(
+        "RUN_TERMINAL",
+        `Cannot resume run ${runId}: already ${status.state}. The run has finished and cannot be resumed.`,
+        `To continue the conversation, send a follow-up: echo "follow-up" | oracle run ${runId} --json`,
+      );
     }
     await spawnWorker(runDirPath);
     // eslint-disable-next-line no-console
@@ -470,7 +503,9 @@ program
   .description("Cancel a run")
   .argument("<run_id>", "run id")
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
+  .option("--json", "Output JSON", false)
   .action(async (runId, options) => {
+    jsonMode = Boolean(options.json);
     await cleanupRuns(options.runsRoot);
     const runDirPath = await requireRunDir(runId, options.runsRoot);
     const initialStatus = await readStatusMaybe(runDirPath);
@@ -478,17 +513,27 @@ program
       ? await waitForNeedsUserResolution(runId, runDirPath, initialStatus)
       : null;
     if (status && ["completed", "failed", "canceled"].includes(status.state)) {
-      throw new Error(`run ${runId} already ${status.state}`);
+      throw new OracleError(
+        "RUN_TERMINAL",
+        `Cannot cancel run ${runId}: already ${status.state}. No action needed.`,
+      );
     }
     const cancelPath = path.join(runDirPath, "cancel.json");
     if (await pathExists(cancelPath)) {
-      throw new Error(`run ${runId} already has a cancel request`);
+      throw new OracleError(
+        "CANCEL_PENDING",
+        `Run ${runId} already has a pending cancel request. Wait for it to take effect — check with "oracle status ${runId}".`,
+      );
     }
     await writeJsonAtomic(cancelPath, {
       canceledAt: nowIso(),
     });
-    // eslint-disable-next-line no-console
-    console.log(`Canceled: ${runId}`);
+    if (options.json) {
+      writeJson({ run_id: runId, canceled: true });
+    } else {
+      // eslint-disable-next-line no-console
+      console.log(`Canceled: ${runId}`);
+    }
   });
 
 program
@@ -496,14 +541,21 @@ program
   .description("Watch a run until completion")
   .argument("<run_id>", "run id")
   .option("--runs-root <dir>", "Runs root directory", defaultRunsRoot())
+  .option("--json", "Output JSON on completion", false)
   .action(async (runId, options) => {
+    jsonMode = Boolean(options.json);
     await cleanupRuns(options.runsRoot);
     const runDirPath = await requireRunDir(runId, options.runsRoot);
     const statusFile = statusPath(runDirPath);
     if (!(await pathExists(statusFile))) {
-      throw new Error(`status not available for run ${runId}`);
+      throw new OracleError(
+        "STATUS_NOT_AVAILABLE",
+        `Status not available for run ${runId}. The run may not have started yet — verify the run_id is correct with "oracle status ${runId}".`,
+        `Verify the run_id or start a new run with: echo "prompt" | oracle run --json`,
+      );
     }
     let lastState = "";
+    let finalStatus: StatusPayload | null = null;
     while (true) {
       const status = await readJson<StatusPayload>(statusPath(runDirPath));
       if (status.state === "needs_user") {
@@ -513,28 +565,40 @@ program
           status,
         );
         if (`${resolved.state}:${resolved.stage}` !== lastState) {
-          // eslint-disable-next-line no-console
-          console.log(
-            `${resolved.state} (${resolved.stage}) ${resolved.message ?? ""}`.trim(),
-          );
+          if (!options.json) {
+            // eslint-disable-next-line no-console
+            console.log(
+              `${resolved.state} (${resolved.stage}) ${resolved.message ?? ""}`.trim(),
+            );
+          }
           lastState = `${resolved.state}:${resolved.stage}`;
         }
         if (["completed", "failed", "canceled"].includes(resolved.state)) {
+          finalStatus = resolved;
           break;
         }
         continue;
       }
       if (`${status.state}:${status.stage}` !== lastState) {
-        // eslint-disable-next-line no-console
-        console.log(
-          `${status.state} (${status.stage}) ${status.message ?? ""}`.trim(),
-        );
+        if (!options.json) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `${status.state} (${status.stage}) ${status.message ?? ""}`.trim(),
+          );
+        }
         lastState = `${status.state}:${status.stage}`;
       }
       if (["completed", "failed", "canceled"].includes(status.state)) {
+        finalStatus = status;
         break;
       }
       await sleep(1000);
+    }
+    if (options.json && finalStatus) {
+      writeJson(finalStatus);
+      if (finalStatus.state !== "completed") {
+        process.exitCode = 1;
+      }
     }
   });
 
@@ -594,8 +658,22 @@ program
   });
 
 program.parseAsync(argv).catch((error) => {
-  // eslint-disable-next-line no-console
-  console.error(error instanceof Error ? error.message : String(error));
+  const message = error instanceof Error ? error.message : String(error);
+  if (jsonMode) {
+    const payload: Record<string, unknown> = {
+      error: true,
+      code: error instanceof OracleError ? error.code : "UNKNOWN_ERROR",
+      message,
+    };
+    if (error instanceof OracleError && error.suggestion) {
+      payload.suggestion = error.suggestion;
+    }
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify(payload, null, 2));
+  } else {
+    // eslint-disable-next-line no-console
+    console.error(message);
+  }
   process.exitCode = 1;
 });
 
@@ -612,7 +690,11 @@ async function resolveRunInvocation(
     promptParts = argv.slice(1);
     const runDirPath = runDir(runId, options.runsRoot);
     if (!(await pathExists(runConfigPath(runDirPath)))) {
-      throw new Error(`run not found: ${runId}`);
+      throw new OracleError(
+        "RUN_NOT_FOUND",
+        `Run not found: ${runId}. Run IDs look like "abc123-def456" — verify the ID is correct.`,
+        `Start a new run with: echo "prompt" | oracle run --json`,
+      );
     }
   }
 
@@ -623,8 +705,10 @@ async function resolveRunInvocation(
   let prompt: string | null = null;
   if (promptFromOptions !== null) {
     if (promptParts.length) {
-      throw new Error(
-        "Unexpected extra arguments when using --prompt/--prompt-file. Include any @file refs inside the prompt string.",
+      throw new OracleError(
+        "INVALID_ARGS",
+        "Cannot combine positional arguments with --prompt or --prompt-file. Use one method: positional args, --prompt, --prompt-file, or stdin.",
+        `Examples: oracle run "prompt" --json, oracle run -p "prompt" --json, echo "prompt" | oracle run --json`,
       );
     }
     prompt = promptFromOptions;
@@ -635,7 +719,11 @@ async function resolveRunInvocation(
     prompt = await readPromptFromStdin();
   }
   if (!prompt) {
-    throw new Error("Prompt is required");
+    throw new OracleError(
+      "PROMPT_REQUIRED",
+      "No prompt provided. Oracle needs a prompt to send to ChatGPT.",
+      `Provide via: echo "prompt" | oracle run --json, or oracle run "prompt" --json, or oracle run -p "prompt" --json`,
+    );
   }
   return {
     runId: runId ?? generateRunId(),
@@ -662,15 +750,28 @@ async function loadPromptFromOptions(
 ): Promise<string | null> {
   if (prompt !== undefined) {
     const trimmed = prompt.trim();
-    if (!trimmed) throw new Error("Prompt is empty");
+    if (!trimmed)
+      throw new OracleError(
+        "PROMPT_EMPTY",
+        "Prompt is empty (contains only whitespace). Provide a non-empty prompt.",
+        `Example: oracle run -p "What is quantum computing?" --json`,
+      );
     return prompt;
   }
   if (promptFile) {
     if (!(await pathExists(promptFile))) {
-      throw new Error(`Prompt file not found: ${promptFile}`);
+      throw new OracleError(
+        "PROMPT_FILE_NOT_FOUND",
+        `Prompt file not found: ${promptFile}. Verify the path exists and is readable.`,
+      );
     }
     const content = (await readJsonOrText(promptFile))?.trim() ?? "";
-    if (!content) throw new Error("Prompt file is empty");
+    if (!content)
+      throw new OracleError(
+        "PROMPT_FILE_EMPTY",
+        `Prompt file is empty: ${promptFile}. The file exists but contains no text.`,
+        `Write your prompt to the file first, then retry.`,
+      );
     return content;
   }
   return null;
@@ -731,7 +832,11 @@ function resolveThinkingMode(input?: string): RunConfig["thinking"] {
   const normalized = (input ?? "extended").trim().toLowerCase();
   if (normalized === "standard") return "standard";
   if (normalized === "extended") return "extended";
-  throw new Error(`Unknown thinking mode: ${input}`);
+  throw new OracleError(
+    "INVALID_OPTION",
+    `Unknown effort mode: "${input}". Valid values: "extended" (deep reasoning, default) or "standard" (faster, less thorough).`,
+    `Use: oracle run --effort extended "prompt" --json`,
+  );
 }
 
 async function spawnWorker(runDirPath: string): Promise<void> {
@@ -833,8 +938,10 @@ async function waitForRunEstablished(
       return;
     }
   }
-  throw new Error(
-    `run ${runId} did not establish within ${Math.round(RUN_ESTABLISH_WAIT_MS / 1000)}s`,
+  throw new OracleError(
+    "RUN_NOT_STARTED",
+    `Run ${runId} did not start within ${Math.round(RUN_ESTABLISH_WAIT_MS / 1000)}s. The worker process may have failed to launch — Chrome may not be installed, or the Oracle Chrome profile at ~/.oracle/chrome/ may be missing or corrupted.`,
+    `Check that Chrome is installed and try: oracle open (to verify browser access)`,
   );
 }
 
@@ -877,8 +984,10 @@ async function waitForPromptSubmitted(
   }
   const state = status?.state ?? "unknown";
   const stage = status?.stage ?? "unknown";
-  throw new Error(
-    `run ${runId} did not submit prompt within ${Math.round(configTimeoutMs / 1000)}s (state=${state}, stage=${stage})`,
+  throw new OracleError(
+    "PROMPT_NOT_SUBMITTED",
+    `Run ${runId} did not submit the prompt within ${Math.round(configTimeoutMs / 1000)}s (state=${state}, stage=${stage}). The browser may be slow, stuck, or ChatGPT may be unresponsive.`,
+    `Check status with "oracle status ${runId}", or cancel and retry with "oracle cancel ${runId}"`,
   );
 }
 
@@ -901,10 +1010,28 @@ async function waitForNeedsUserResolution(
   const type = latest.needs?.type ?? "unknown";
   const details = latest.needs?.details ?? latest.message ?? "";
   const stage = latest.stage ?? "unknown";
-  const suffix = details ? ` - ${details}` : "";
-  throw new Error(
-    `run ${runId} requires user intervention (needs_user: ${type}${suffix}, stage=${stage}). ` +
-      "Please escalate this issue to your user.",
+  const suffix = details ? ` — ${details}` : "";
+  const typeHints: Record<string, string> = {
+    login:
+      "The user needs to log in to ChatGPT. Ask them to run: oracle open",
+    cloudflare:
+      "Cloudflare challenge detected. Ask the user to open a browser and solve it: oracle open",
+    kill_chrome:
+      "Chrome is stuck and needs to be restarted. Resume with: oracle resume " +
+      runId +
+      " --allow-kill",
+    chrome_restart_approval:
+      "Chrome restart needs user approval. The user should check their notifications.",
+    profile:
+      "Browser profile is in use by another process. Close the other browser or wait for it to finish.",
+    firefox_app:
+      "Firefox Developer Edition or Nightly not found. Install it or specify the path with --firefox-app.",
+  };
+  const hint = typeHints[type] ?? "Please escalate this issue to your user.";
+  throw new OracleError(
+    "NEEDS_USER",
+    `Run ${runId} requires user intervention (type: ${type}, stage: ${stage})${suffix}. ${hint}`,
+    hint,
   );
 }
 
@@ -934,9 +1061,10 @@ async function waitForConversationUrl(
     ) {
       const state = latestStatus.state;
       const stage = latestStatus.stage ?? "unknown";
-      throw new Error(
-        `run ${runId} has no conversation URL (state=${state}, stage=${stage}). ` +
-          "Run did not complete or never created a conversation.",
+      throw new OracleError(
+        "NO_CONVERSATION_URL",
+        `Run ${runId} has no conversation URL (state=${state}, stage=${stage}). The run ended before navigating to ChatGPT successfully.`,
+        `Check "oracle status ${runId}" for details, or start a new run`,
       );
     }
     await sleep(CONVERSATION_URL_POLL_MS);
@@ -949,9 +1077,10 @@ async function waitForConversationUrl(
   }
   const state = latestStatus?.state ?? "unknown";
   const stage = latestStatus?.stage ?? "unknown";
-  throw new Error(
-    `run ${runId} has no conversation URL (state=${state}, stage=${stage}). ` +
-      "Run did not complete or never created a conversation.",
+  throw new OracleError(
+    "NO_CONVERSATION_URL",
+    `Run ${runId} timed out waiting for a conversation URL (state=${state}, stage=${stage}). The browser may not have navigated to ChatGPT successfully.`,
+    `Check "oracle status ${runId}" for details, or cancel and start a new run`,
   );
 }
 
@@ -961,7 +1090,11 @@ async function requireRunDir(
 ): Promise<string> {
   const runDirPath = runDir(runId, runsRoot);
   if (!(await pathExists(runConfigPath(runDirPath)))) {
-    throw new Error(`run not found: ${runId}`);
+    throw new OracleError(
+      "RUN_NOT_FOUND",
+      `Run not found: ${runId}. The run_id may be incorrect, or the run data was cleaned up (runs expire after 48h).`,
+      `Start a new run with: echo "prompt" | oracle run --json`,
+    );
   }
   return runDirPath;
 }
@@ -982,7 +1115,11 @@ async function loadStatusForRun(
   const runDirPath = await requireRunDir(runId, runsRoot);
   const statusFile = statusPath(runDirPath);
   if (!(await pathExists(statusFile))) {
-    throw new Error(`status not available for run ${runId}`);
+    throw new OracleError(
+      "STATUS_NOT_AVAILABLE",
+      `Status not available for run ${runId}. The worker process may not have started yet or the run_id may be incorrect.`,
+      `Wait a moment and retry, or verify the run_id with a new run: echo "prompt" | oracle run --json`,
+    );
   }
   const status = await readJson<StatusPayload>(statusFile);
   return { runDirPath, status };
@@ -991,7 +1128,10 @@ async function loadStatusForRun(
 function parsePositiveInt(value: string, label: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
-    throw new Error(`${label} must be a positive integer`);
+    throw new OracleError(
+      "INVALID_OPTION",
+      `Invalid value for ${label}: "${value}". Must be a positive integer (e.g., 15000).`,
+    );
   }
   return parsed;
 }
@@ -1000,7 +1140,10 @@ function resolveBrowserOption(input?: string): "chrome" | "firefox" {
   if (!input) return "chrome";
   const normalized = input.trim().toLowerCase();
   if (normalized === "chrome" || normalized === "firefox") return normalized;
-  throw new Error(`Unknown browser: ${input}`);
+  throw new OracleError(
+    "INVALID_OPTION",
+    `Unknown browser: "${input}". Valid values: "chrome" or "firefox".`,
+  );
 }
 
 function assertValidUrl(value: string, label: string): void {
@@ -1008,10 +1151,16 @@ function assertValidUrl(value: string, label: string): void {
   try {
     parsed = new URL(value);
   } catch {
-    throw new Error(`Invalid ${label}: ${value}`);
+    throw new OracleError(
+      "INVALID_URL",
+      `Invalid ${label}: "${value}". Expected a valid HTTP or HTTPS URL (e.g., https://chatgpt.com/).`,
+    );
   }
   if (!["http:", "https:"].includes(parsed.protocol)) {
-    throw new Error(`Invalid ${label}: ${value}`);
+    throw new OracleError(
+      "INVALID_URL",
+      `Invalid ${label}: "${value}". URL must use http:// or https:// protocol (got ${parsed.protocol}).`,
+    );
   }
 }
 

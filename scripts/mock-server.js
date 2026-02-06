@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const http = require("http");
+const crypto = require("crypto");
 const { URL } = require("url");
 
 const args = process.argv.slice(2);
@@ -8,15 +9,30 @@ const port = getArgValue(args, "--port")
   : 7777;
 const once = args.includes("--once");
 
+// In-memory conversation store for follow-up support
+const conversations = new Map();
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
-  // Accept root and /c/* paths (conversation URLs)
+
+  // Accept root, /c/* (conversation URLs), and /?scenario=* paths
   if (url.pathname !== "/" && !url.pathname.startsWith("/c/")) {
     res.writeHead(404);
     res.end("not found");
     return;
   }
-  const html = buildHtml();
+
+  // Extract conversation ID from /c/<id> paths
+  const conversationId = url.pathname.startsWith("/c/")
+    ? url.pathname.slice(3).split("?")[0]
+    : null;
+
+  // Load existing conversation messages for follow-up rendering
+  const existingMessages = conversationId
+    ? conversations.get(conversationId) || []
+    : [];
+
+  const html = buildHtml(url.searchParams, existingMessages, conversationId);
   res.writeHead(200, { "Content-Type": "text/html" });
   res.end(html);
   if (once) {
@@ -29,7 +45,33 @@ server.listen(port, "127.0.0.1", () => {
   console.log(`Mock ChatGPT listening on http://127.0.0.1:${port}`);
 });
 
-function buildHtml() {
+function buildHtml(params, existingMessages, conversationId) {
+  // Scenario-based behavior via query params:
+  //   ?scenario=fail          — response generation fails (no copy button)
+  //   ?scenario=stall         — response stalls forever (stop button stays)
+  //   ?scenario=slow_start    — 5s delay before prompt input is ready
+  //   ?scenario=error_text    — response contains error message from ChatGPT
+  //   ?durationMs=N           — control total response duration
+  //   ?delayMs=N              — control per-character delay (default 50ms)
+  //
+  // All scenarios support conversation continuation (follow-up messages).
+
+  const messagesHtml = existingMessages
+    .map(
+      (m, i) =>
+        `<div data-testid="conversation-turn-${i + 1}" class="msg ${m.role}">` +
+        `<div data-message-author-role="${m.role}">` +
+        `<article>${escapeHtml(m.text)}</article>` +
+        `</div>` +
+        (m.role === "assistant"
+          ? `<div class="turn-actions"><button data-testid="copy-turn-action-button" aria-label="Copy">Copy</button></div>`
+          : "") +
+        `</div>`,
+    )
+    .join("\n    ");
+
+  const startIndex = existingMessages.length;
+
   return `<!doctype html>
 <html>
 <head>
@@ -79,7 +121,7 @@ function buildHtml() {
   </div>
 
   <div class="content">
-    <main class="messages" id="messages"></main>
+    <main class="messages" id="messages">${messagesHtml}</main>
 
     <div class="actions">
       <button id="action-good" data-testid="good-response-turn-action-button" style="display:none;">👍</button>
@@ -139,6 +181,20 @@ function buildHtml() {
     const plusBtn = document.getElementById('plus-btn');
     const fileInput = document.getElementById('file-input');
     const attachmentArea = document.getElementById('attachment-area');
+
+    // Configuration from query params (carried through page lifecycle)
+    const pageParams = new URLSearchParams(window.location.search);
+    const scenario = pageParams.get('scenario') || '';
+
+    // Slow start: hide prompt input briefly to simulate page loading
+    if (scenario === 'slow_start') {
+      input.style.display = 'none';
+      send.style.display = 'none';
+      setTimeout(() => {
+        input.style.display = '';
+        send.style.display = '';
+      }, 5000);
+    }
 
     send.addEventListener('click', () => startRun());
     input.addEventListener('keydown', (event) => {
@@ -217,10 +273,18 @@ function buildHtml() {
       if (!prompt) return;
       appendMessage('user', prompt);
       input.value = '';
+
+      // Navigate to conversation URL (like real ChatGPT)
+      if (!window.location.pathname.startsWith('/c/')) {
+        const convId = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+        const newUrl = '/c/' + convId + window.location.search;
+        window.history.pushState({}, '', newUrl);
+      }
+
       simulateStreaming(prompt);
     }
 
-    let messageIndex = 0;
+    let messageIndex = ${startIndex};
     function appendMessage(role, text) {
       // Structure matches real ChatGPT: conversation-turn wrapper > role div > article
       messageIndex += 1;
@@ -239,10 +303,74 @@ function buildHtml() {
     }
 
     function simulateStreaming(prompt) {
-      const params = new URLSearchParams(location.search);
-      const durationMs = Number(params.get('durationMs') || 0);
-      const delayMsParam = Number(params.get('delayMs') || 50);
-      const stall = params.get('stall') === '1';
+      const durationMs = Number(pageParams.get('durationMs') || 0);
+      const delayMsParam = Number(pageParams.get('delayMs') || 50);
+
+      // Scenario: stall — never complete
+      if (scenario === 'stall') {
+        const { article } = appendMessage('assistant', '');
+        stop.style.display = 'inline-block';
+        actionGood.style.display = 'none';
+        actionBad.style.display = 'none';
+        let idx = 0;
+        const partial = 'Thinking about this...';
+        const stallTimer = setInterval(() => {
+          idx += 1;
+          if (idx <= partial.length) {
+            article.innerText = partial.slice(0, idx);
+          }
+          // Never adds copy button, stop stays visible
+        }, delayMsParam);
+        return;
+      }
+
+      // Scenario: error_text — ChatGPT returns an error message
+      if (scenario === 'error_text') {
+        const errorResponse = 'An error occurred while generating a response. Please try again.';
+        const { container, article } = appendMessage('assistant', '');
+        stop.style.display = 'inline-block';
+        let idx = 0;
+        const errTimer = setInterval(() => {
+          idx += 1;
+          article.innerText = errorResponse.slice(0, idx);
+          if (idx >= errorResponse.length) {
+            clearInterval(errTimer);
+            stop.style.display = 'none';
+            // Still adds copy button (ChatGPT does this even for error responses)
+            const turnActions = document.createElement('div');
+            turnActions.className = 'turn-actions';
+            const copyBtn = document.createElement('button');
+            copyBtn.setAttribute('data-testid', 'copy-turn-action-button');
+            copyBtn.setAttribute('aria-label', 'Copy');
+            copyBtn.textContent = 'Copy';
+            turnActions.appendChild(copyBtn);
+            container.appendChild(turnActions);
+          }
+        }, 20);
+        return;
+      }
+
+      // Scenario: fail — response fails (stop disappears but no copy button = ResponseFailedError)
+      if (scenario === 'fail') {
+        const { article } = appendMessage('assistant', '');
+        stop.style.display = 'inline-block';
+        actionGood.style.display = 'none';
+        actionBad.style.display = 'none';
+        let idx = 0;
+        const partial = 'I was working on this but...';
+        const failTimer = setInterval(() => {
+          idx += 1;
+          article.innerText = partial.slice(0, idx);
+          if (idx >= partial.length) {
+            clearInterval(failTimer);
+            // Stop disappears but NO copy button — this triggers ResponseFailedError
+            stop.style.display = 'none';
+          }
+        }, delayMsParam);
+        return;
+      }
+
+      // Default: happy path — echo prompt + stream response
       const response = 'Echo: ' + prompt + '\\n\\nThis is a mocked streaming response.';
       const delay = durationMs ? Math.max(10, Math.floor(durationMs / response.length)) : delayMsParam;
       const { container, article } = appendMessage('assistant', '');
@@ -251,7 +379,6 @@ function buildHtml() {
       actionBad.style.display = 'none';
       let idx = 0;
       const timer = setInterval(() => {
-        if (stall) return;
         idx += 1;
         const chunk = response.slice(0, idx);
         article.innerText = chunk;
@@ -276,6 +403,14 @@ function buildHtml() {
   </script>
 </body>
 </html>`;
+}
+
+function escapeHtml(text) {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function getArgValue(argv, name) {
