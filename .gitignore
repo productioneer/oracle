@@ -9,5 +9,10 @@ scripts/evals/results/
 .work/
 
 klaustest
-.klaus
+.klaus/
 !.klaus/grounding.md
+
+# Klaus session artifacts
+Klaus.md
+.mcp.json
+transcript-processing/

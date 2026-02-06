@@ -4,7 +4,7 @@ Canonical reference for automating ChatGPT web UI. This is the up-to-date spec f
 
 > **See also**: [oracle-improvements.md](./oracle-improvements.md) for additional context: CLI design, recovery behavior, thinking output feature, and the thinking monitoring pattern for subagents.
 >
-> **Library details**: [playwright-notes.md](./playwright-notes.md) (recommended) or [puppeteer-notes.md](./puppeteer-notes.md) for implementation-specific patterns (file uploads, network idle, etc.).
+> **Library details**: [playwright-notes.md](./playwright-notes.md) for implementation-specific patterns (file uploads, network idle, etc.).
 
 **General rule**: Always wait for an element to exist before interacting with it.
 

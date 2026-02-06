@@ -180,17 +180,3 @@ await page.locator(selector).waitFor({ state: 'hidden' });
 await page.locator(selector).waitFor({ state: 'attached' });
 ```
 
----
-
-## Migration from Puppeteer
-
-| Puppeteer | Playwright |
-|-----------|------------|
-| `page.$(selector)` | `page.locator(selector)` |
-| `page.waitForSelector(sel)` | `page.locator(sel).waitFor()` (or just use locator - auto-waits) |
-| `page.click(selector)` | `page.locator(selector).click()` |
-| `page.type(sel, text)` | `page.locator(sel).fill(text)` or `page.keyboard.type(text)` |
-| `element.uploadFile(path)` | `locator.setInputFiles(path)` |
-| `page.waitForNetworkIdle()` | `page.waitForLoadState('networkidle')` |
-| `page.evaluate(fn)` | `page.evaluate(fn)` (same) |
-| `page.waitForFunction(fn)` | `page.waitForFunction(fn)` (same) |

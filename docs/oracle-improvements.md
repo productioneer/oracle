@@ -6,7 +6,7 @@ Findings and decisions from testing session. For Codex implementation.
 >
 > **This document** contains additional context not in the browser spec: CLI design, recovery behavior, thinking output feature, conversation continuation, and the thinking monitoring pattern for subagents. All content remains valid.
 >
-> **Library-specific details**: See [puppeteer-notes.md](./puppeteer-notes.md) and [playwright-notes.md](./playwright-notes.md) for library-specific implementation details (file uploads, network idle detection, etc.).
+> **Library-specific details**: See [playwright-notes.md](./playwright-notes.md) for library-specific implementation details (file uploads, network idle detection, etc.).
 
 ---
 
@@ -22,13 +22,11 @@ Findings and decisions from testing session. For Codex implementation.
 
 ### Automation Library
 
-**Use Playwright, not Puppeteer.** Playwright is the more modern library with:
+**Use Playwright.** Features:
 - Built-in auto-waiting on all actions
 - Better file upload API (`setInputFiles`)
 - Native network idle detection (`waitForLoadState('networkidle')`)
 - Cross-browser support if ever needed
-
-Migration from Puppeteer to Playwright is required.
 
 ### Chrome Window Invariants (macOS)
 
