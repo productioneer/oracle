@@ -358,6 +358,7 @@ function buildHtml(params, existingMessages, conversationId) {
         actionBad.style.display = 'none';
         let idx = 0;
         const partial = 'I was working on this but...';
+        const failDelay = durationMs ? Math.max(10, Math.floor(durationMs / partial.length)) : delayMsParam;
         const failTimer = setInterval(() => {
           idx += 1;
           article.innerText = partial.slice(0, idx);
@@ -366,7 +367,7 @@ function buildHtml(params, existingMessages, conversationId) {
             // Stop disappears but NO copy button — this triggers ResponseFailedError
             stop.style.display = 'none';
           }
-        }, delayMsParam);
+        }, failDelay);
         return;
       }
 

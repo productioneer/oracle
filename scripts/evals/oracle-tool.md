@@ -56,9 +56,21 @@ Common error codes:
 - `STATUS_NOT_AVAILABLE` — status file not yet written (run may still be starting)
 - `NEEDS_USER` — requires manual intervention (login, Cloudflare). Escalate to user.
 
+**`oracle watch --json` terminal states:**
+When `watch --json` completes, it outputs the final status. Check the `state` field:
+- `"state":"completed"` — success. Use `oracle result <run_id>` to get the response.
+- `"state":"failed"` — the response failed at the browser level (e.g., ChatGPT error). Report the failure. The `message` field explains what happened.
+- `"state":"canceled"` — the run was canceled.
+
+A non-completed state sets exit code 1.
+
+**Response text may contain ChatGPT errors:**
+Even when state is "completed", the response text from `oracle result` may be a ChatGPT error message (e.g., "An error occurred while generating a response"). Inspect the result text — if it looks like a generic error rather than a real answer, report it as a ChatGPT error.
+
 **Recovery rules:**
 - If `oracle run` fails, the error message explains what happened and what to do.
 - If `oracle watch` reports `needs_user`, escalate to the user immediately.
+- If `oracle watch --json` reports `"state":"failed"`, report the failure to the user. Do not retry automatically.
 - If `oracle result` says result not available, use `oracle watch <run_id>` to wait for completion.
 - On persistent failures (same query fails >2 times), alert the human — do not keep retrying.
 

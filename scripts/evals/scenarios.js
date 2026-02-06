@@ -161,6 +161,45 @@ const scenarios = [
     expectedMinCommands: 4,
     extraOpts: (tmpDir) => ({ tempFile: `${tmpDir}/eval-attachment.txt` }),
   },
+
+  // --- Response Failure (browser-level) ---
+  {
+    id: 'response-failure',
+    name: 'Handle browser-level response failure',
+    mockUrl: '/?scenario=fail&durationMs=20000',
+    task: (nonce) => `Use oracle to run prompt "eval-fail ${nonce}" with --json. Then watch the run with "oracle watch <run_id> --json". The response may fail at the browser level. Report the outcome. Return JSON: {"run_id":"...","state":"...","error":"..."}.`,
+    validate: (result) => {
+      return {
+        usedRun: result.commandLines.some(c => c.includes('oracle run')),
+        usedWatch: result.commandLines.some(c => c.includes('oracle watch')),
+        sawFailed: result.rawOutput.includes('"failed"') || result.rawOutput.includes('failed') ||
+                   result.assistantText.includes('failed'),
+        reportedState: result.assistantText.includes('failed') || result.assistantText.includes('error'),
+        efficientCommands: result.oracleCommandCount <= 5,
+      };
+    },
+    maxCommands: 6,
+    expectedMinCommands: 2,
+  },
+
+  // --- Error Text in Response ---
+  {
+    id: 'error-text-response',
+    name: 'Detect ChatGPT error message in response text',
+    mockUrl: '/?scenario=error_text',
+    task: (nonce) => `Use oracle to run prompt "eval-errtext ${nonce}" with --json. Watch it, then get the result. Examine the response text carefully — it may contain an error from ChatGPT rather than a real answer. Report what you find. Return JSON: {"run_id":"...","result":"...","is_chatgpt_error":true|false}.`,
+    validate: (result) => {
+      return {
+        usedRun: result.commandLines.some(c => c.includes('oracle run')),
+        usedWatch: result.commandLines.some(c => c.includes('oracle watch')),
+        usedResult: result.commandLines.some(c => c.includes('oracle result')),
+        detectedError: result.assistantText.toLowerCase().includes('error') &&
+                       (result.assistantText.includes('is_chatgpt_error') || result.assistantText.includes('true')),
+      };
+    },
+    maxCommands: 5,
+    expectedMinCommands: 3,
+  },
 ];
 
 module.exports = { scenarios };
