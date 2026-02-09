@@ -2,7 +2,11 @@
 
 Give your AI agents access to ChatGPT. Oracle is a CLI tool that lets AI agents (Claude, Codex, etc.) query ChatGPT Pro via browser automation — completely hands-free, running in the background.
 
+> **Early-stage software.** This project works and is actively used, but it automates a browser against a third-party website — things can break when ChatGPT's UI changes, and browser automation on your machine is inherently somewhat invasive. Review the code before running it, and use at your own risk.
+
 > **macOS only** in its current version (uses AppleScript and macOS-specific Chrome management).
+
+> **Built by AI.** The vast majority of this codebase was written by Claude and Codex (OpenAI), with human direction and review by [@seeekr](https://github.com/seeekr). Treat accordingly — it's been tested and works well, but hasn't had extensive manual code review.
 
 ## Why
 
@@ -238,7 +242,9 @@ See [docs/TESTING.md](docs/TESTING.md) for testing details.
 
 ## Disclaimer
 
-Oracle automates a browser session with your own ChatGPT account. Please ensure your usage complies with OpenAI's [Terms of Use](https://openai.com/policies/terms-of-use/).
+Oracle automates a real Chrome browser against ChatGPT. This means it interacts with your ChatGPT account and manages Chrome processes on your machine. While it uses a dedicated Chrome profile and takes care to not interfere with your personal browser, browser automation is inherently somewhat unpredictable — ChatGPT's UI can change without notice, and things may break.
+
+Please also ensure your usage complies with OpenAI's [Terms of Use](https://openai.com/policies/terms-of-use/).
 
 ## Acknowledgments
 
