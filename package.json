@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "description": "Browser-based tool for AI agents to query ChatGPT via browser automation. macOS only.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/productioneer/oracle.git"
+  },
+  "bugs": "https://github.com/productioneer/oracle/issues",
+  "homepage": "https://github.com/productioneer/oracle",
   "type": "commonjs",
   "bin": {
     "oracle": "dist/cli.js"

@@ -236,6 +236,10 @@ npm run eval:agents
 
 See [docs/TESTING.md](docs/TESTING.md) for testing details.
 
+## Disclaimer
+
+Oracle automates a browser session with your own ChatGPT account. Please ensure your usage complies with OpenAI's [Terms of Use](https://openai.com/policies/terms-of-use/).
+
 ## Acknowledgments
 
 Inspired by [@steipete/oracle](https://github.com/steipete/oracle) by Peter Steinberger — an API-based Oracle CLI. This project takes a different approach: browser automation instead of API calls, designed specifically for agents that need ChatGPT Pro's extended thinking capabilities via the web interface.
