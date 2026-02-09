@@ -54,7 +54,15 @@ ORACLE_DEV=1 node dist/cli.js run "long" --base-url http://127.0.0.1:7777/?durat
 
 ## Structured Output Extraction
 
-Automated extraction tests validate JSON/XML/exact-string outputs using headless Chromium:
+Automated extraction tests validate JSON/XML/exact-string outputs using headless Chromium.
+
+First, install the Playwright browser binary (one-time):
+
+```
+npx playwright install chromium
+```
+
+Then run the tests:
 
 ```
 npm test

@@ -87,7 +87,7 @@ Cross-reference of selectors across three sources: the spec (`docs/chatgpt-brows
 
 ### ProseMirror vs Textarea
 The real ChatGPT uses a ProseMirror contenteditable `#prompt-textarea`. The mock uses a plain `<textarea>`. This means:
-- The mock can't catch typing-related regressions (the macOS minimize/suspend bug that was fixed in Block 3 would not reproduce against the mock)
+- The mock can't catch typing-related regressions (for instance, a macOS minimize/suspend bug would not reproduce against the mock)
 - Paste via synthetic `ClipboardEvent` (the primary text entry method) works differently — ProseMirror has a native paste handler that processes `ClipboardEvent`, while a plain textarea would not respond the same way
 - Enter key behavior differs — ProseMirror maps Enter to "submit", Shift+Enter to line break; a plain textarea creates newlines on Enter
 

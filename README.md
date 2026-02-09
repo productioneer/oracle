@@ -19,7 +19,7 @@ AI agents sometimes need to consult other AI models. Oracle makes this possible 
 - **macOS** (Ventura or later)
 - **Node.js** 18+
 - **Google Chrome** installed
-- **ChatGPT account** (Plus or Pro subscription recommended for extended thinking)
+- **ChatGPT account** with a Pro subscription (extended thinking requires Pro)
 
 ## Install
 

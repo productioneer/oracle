@@ -79,8 +79,9 @@ No file edits except temp files for testing. Commands only. No chatgpt.com.`;
 
   const baseUrl = `http://127.0.0.1:${port}${scenario.mockUrl || '/'}`;
   const env = sanitizeEnv({
-    ...process.env,
     PATH: `${path.join(__dirname, 'bin')}:${process.env.PATH || ''}`,
+    HOME: process.env.HOME || '',
+    TMPDIR: process.env.TMPDIR || '',
     ORACLE_EVAL_BASE_URL: baseUrl,
     ORACLE_BASE_URL: baseUrl,
     ORACLE_EVAL_TIMEOUT_MS: process.env.ORACLE_EVAL_TIMEOUT_MS || '120000',

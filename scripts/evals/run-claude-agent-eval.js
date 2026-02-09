@@ -65,8 +65,9 @@ async function main() {
   const baseUrl = process.env.ORACLE_EVAL_BASE_URL || DEFAULT_BASE_URL;
   const oracleHome = process.env.HOME ? path.join(process.env.HOME, '.oracle') : null;
   const env = sanitizeEnv({
-    ...process.env,
     PATH: `${path.join(__dirname, 'bin')}:${process.env.PATH || ''}`,
+    HOME: process.env.HOME || '',
+    TMPDIR: process.env.TMPDIR || '',
     ORACLE_EVAL_BASE_URL: baseUrl,
     ORACLE_BASE_URL: baseUrl,
     ORACLE_EVAL_TIMEOUT_MS: process.env.ORACLE_EVAL_TIMEOUT_MS || '120000',
