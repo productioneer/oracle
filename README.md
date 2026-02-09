@@ -1,95 +1,241 @@
 # Oracle
 
-Browser-based tool for AI agents to query GPT via the ChatGPT web interface.
+Give your AI agents access to ChatGPT. Oracle is a CLI tool that lets AI agents (Claude, Codex, etc.) query ChatGPT Pro via browser automation — completely hands-free, running in the background.
+
+> **macOS only** in its current version (uses AppleScript and macOS-specific Chrome management).
+
+## Why
+
+AI agents sometimes need to consult other AI models. Oracle makes this possible by automating a real Chrome browser session against ChatGPT, with:
+
+- **Zero focus steal** — Oracle Chrome runs offscreen and never interrupts your work
+- **Personal Chrome isolation** — uses a dedicated browser profile at `~/.oracle/chrome`, completely separate from your personal Chrome
+- **Long-running query support** — handles queries that take minutes to hours (ChatGPT Pro extended thinking)
+- **Structured error handling** — all errors include codes, messages, and recovery suggestions in JSON
+- **Conversation continuity** — follow-up messages to existing conversations
+
+## Prerequisites
+
+- **macOS** (Ventura or later)
+- **Node.js** 18+
+- **Google Chrome** installed
+- **ChatGPT account** (Plus or Pro subscription recommended for extended thinking)
+
+## Install
+
+```bash
+git clone https://github.com/productioneer/oracle.git
+cd oracle
+npm install
+npm run build
+```
+
+To make the `oracle` command available globally, add it to your PATH:
+
+```bash
+# Add to your shell profile (~/.zshrc, ~/.bashrc, etc.)
+export PATH="/path/to/oracle/dist:$PATH"
+
+# Or create a symlink
+ln -s "$(pwd)/dist/cli.js" /usr/local/bin/oracle
+```
 
 ## Quick Start
 
-```bash
-npm install
-npm run build
+### 1. Log in to ChatGPT
 
-# run a prompt (background)
-node dist/cli.js run "Hello"
-
-# check status
-node dist/cli.js status <run_id>
-
-# watch until completion
-node dist/cli.js watch <run_id>
-
-# get result
-node dist/cli.js result <run_id>
-
-# continue a conversation
-node dist/cli.js run <run_id> "Follow up"
-
-# stdin prompt
-echo "Hello" | node dist/cli.js run
-```
-
-## Core Commands
-
-- `oracle run` — start a run (blocks until prompt is submitted).
-- `oracle status` — read `status.json`.
-- `oracle watch` — poll until completion.
-- `oracle result` — print result content/metadata.
-- `oracle thinking` — print thinking output (incremental by default, `--full` for complete).
-- `oracle resume` — restart a run using existing state.
-- `oracle cancel` — cancel a run.
-- `oracle open` — open visible browser window for login/recovery.
-
-## Mock ChatGPT Interface (Evaluation)
-
-Start the mock server:
+On first use, open a visible browser window to log in:
 
 ```bash
-node scripts/mock-server.js --port 7777
+oracle open
 ```
 
-Use it as the base URL (requires `ORACLE_DEV=1` for localhost URLs):
+This opens Chrome with Oracle's dedicated profile. Log in to ChatGPT, then close the window. You only need to do this once — the session persists.
+
+### 2. Run a query
 
 ```bash
-ORACLE_DEV=1 node dist/cli.js run "Hello" --base-url http://127.0.0.1:7777/
+# Start a run (returns immediately with a run_id)
+echo "What is the mass of the Sun?" | oracle run --json
+
+# Wait for completion
+oracle watch <run_id>
+
+# Get the result
+oracle result <run_id>
 ```
 
-Simulate long wait / stuck streaming:
+### 3. Continue a conversation
 
+```bash
+echo "How does that compare to Jupiter?" | oracle run <run_id> --json
+oracle watch <run_id>
+oracle result <run_id>
 ```
-http://127.0.0.1:7777/?stall=1
+
+## Agent Quick Start
+
+Oracle is designed to be used by AI agents. Copy the instructions below into your agent's system prompt or memory file (for instance, Claude Code's `~/.claude/CLAUDE.md`):
+
+<details>
+<summary><strong>Click to expand agent instructions</strong></summary>
+
+````markdown
+## Oracle CLI
+
+Query ChatGPT Pro via browser automation. Runs asynchronously — start a run, wait for completion, get the result.
+
+### Standard Workflow (3 commands)
+
+```bash
+# 1. Start a run (returns run_id in JSON)
+echo "your prompt" | oracle run --json
+
+# 2. Wait for completion (blocks until done, prints status updates)
+oracle watch <run_id>
+
+# 3. Get the response text
+oracle result <run_id>
 ```
 
-You can set `ORACLE_DEV=1` to expose `--timeout-ms` for long-run testing.
+### Important Notes
 
-## Notes
+- **Always use `--json`** with `oracle run` to get structured output with the run_id.
+- **`oracle watch` blocks** until the run completes — no need to poll manually.
+- **`oracle result`** returns the response text on stdout. Use `--json` for structured metadata.
+- Runs are stored under `~/.oracle/runs/<run_id>/`.
 
-- Chrome focus-safe launch uses `open -n -g` with offscreen window positioning (`--window-position=-32000,-32000`) plus AppleScript hiding.
-- Default effort is Extended; use `--effort standard` to override.
-- Firefox support uses Playwright (headful, WebDriver BiDi protocol). Focus prevention is best-effort.
-- On macOS, Firefox automation requires Firefox Developer Edition or Nightly (distinct bundle ID) to avoid controlling your personal Firefox. Install one or pass `--firefox-app /Applications/Firefox\ Developer\ Edition.app` (or set `ORACLE_FIREFOX_APP`). Keep that app reserved for Oracle; if its window title doesn't match the Oracle automation homepage, focus suppression is skipped to avoid touching personal windows.
-- Firefox focus on macOS uses an AppleScript ladder (background launch → hide → minimize). If permissions are blocked, the window may stay visible and `status.json` will include a `focus` section with `state` and `needsUser` details.
-- Firefox on macOS runs a setup-first phase before any tab work: profile window size is pre-set to a tiny setup size, then the window is hidden/minimized, waits briefly, and only then resizes to a normal working size before navigation.
-- Firefox automation runs reuse a long-lived instance (hidden) to avoid repeated window flash. Quit Firefox to reset, or remove `~/.oracle/firefox/oracle-connection.json` if reuse gets stuck.
-- macOS permissions: granting Automation (controlling Firefox) and Accessibility (System Events) to the terminal/osascript process may be required for focus suppression.
-- Runs persist state under `~/.oracle/runs/<run_id>` by default.
-- Chrome always uses the dedicated Oracle profile at `~/.oracle/chrome` (isolated from your main Chrome).
-- Firefox uses a dedicated Oracle profile at `~/.oracle/firefox` by default (override with `--firefox-profile`).
-- If login/Cloudflare is detected, `status.json` will be set to `needs_user`. All commands wait up to 30s for it to clear, then error with “please escalate to your user.” Use `oracle open` (no run id) to login, then `oracle resume <run_id>`.
-- If `needs_user: kill_chrome` is set, resume with `oracle resume <run_id> --allow-kill` after reviewing the prompt.
-- Use `--focus-only` to test Firefox focus suppression without navigating to ChatGPT. Focus-only runs do not pool Firefox; the automation instance is closed after each run.
-- Debug artifacts (HTML/PNG) are written to `~/.oracle/runs/<run_id>/debug` when prompt input fails or when running against localhost.
-- If Chrome is stuck and you pass `--allow-kill`, Oracle requests graceful shutdown first (SIGTERM, waits ~10s). If Chrome doesn't exit, set `ORACLE_FORCE_KILL=1` to enable SIGKILL.
-- **Personal Chrome isolation**: On macOS, Oracle skips app-level hiding when your personal Chrome is running, to avoid accidentally hiding your browser. This means Oracle Chrome may be partially visible (parked offscreen) during runs. Set `ORACLE_FORCE_APP_HIDE=1` to force app-level hiding for maximum stealth, but note this may hide your personal Chrome windows too.
+### All Commands
+
+| Command | Purpose |
+|---------|---------|
+| `oracle run "<prompt>" --json` | Start new run, get run_id |
+| `echo "prompt" \| oracle run --json` | Start run via stdin |
+| `echo "follow-up" \| oracle run <run_id> --json` | Continue conversation |
+| `oracle watch <run_id>` | Wait for completion |
+| `oracle result <run_id>` | Get response text |
+| `oracle result <run_id> --json` | Get response metadata (JSON) |
+| `oracle status <run_id>` | Check current state |
+| `oracle cancel <run_id>` | Cancel active run |
+| `oracle thinking <run_id>` | Get thinking output (incremental) |
+| `oracle thinking <run_id> --full` | Get full thinking output |
+
+### Error Handling
+
+All commands support `--json`. With `--json`, errors output structured JSON to stdout:
+```json
+{"error": true, "code": "ERROR_CODE", "message": "...", "suggestion": "..."}
+```
+
+Common error codes:
+- `PROMPT_REQUIRED` — no prompt provided
+- `RUN_NOT_FOUND` — invalid run_id or run expired (runs expire after 48h)
+- `RUN_TERMINAL` — run already completed/failed/canceled
+- `RESULT_NOT_AVAILABLE` — result not ready yet (use `oracle watch` first)
+- `NEEDS_USER` — requires manual intervention (login, Cloudflare). Escalate to user.
+
+### `oracle watch --json` terminal states
+
+When `watch --json` completes, check the `state` field:
+- `"state":"completed"` — success. Use `oracle result <run_id>` to get the response.
+- `"state":"failed"` — browser-level failure. Report it.
+- `"state":"canceled"` — the run was canceled.
+
+**Response text may contain ChatGPT errors** — even when state is "completed", inspect the result text. If it looks like a generic error rather than a real answer, report it.
+
+### Recovery
+
+- If `oracle watch` reports `needs_user`, escalate to the user immediately.
+- If `oracle watch --json` reports `"state":"failed"`, report the failure. Do not retry automatically.
+- On persistent failures (same query fails >2 times), alert the human.
+
+### @file References
+
+Include file contents in prompts: `@path/to/file.ts` uploads as attachment, `@file.ts:23-90` inlines specific lines.
+````
+
+</details>
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `oracle run` | Start a new run or continue a conversation |
+| `oracle watch` | Watch a run until completion |
+| `oracle status` | Check run status |
+| `oracle result` | Get the response text |
+| `oracle thinking` | Get thinking/reasoning output |
+| `oracle resume` | Resume a paused run |
+| `oracle cancel` | Cancel an active run |
+| `oracle open` | Open a visible browser for login/recovery |
+
+All commands support `--json` for machine-readable output. Use `oracle <command> --help` for full options.
+
+## How It Works
+
+1. **`oracle run`** launches a detached Chrome worker process with Oracle's dedicated profile
+2. The worker navigates to ChatGPT, submits your prompt, and waits for the response
+3. Chrome runs offscreen (`--window-position=-32000,-32000`) with AppleScript hiding — it never steals focus
+4. State is persisted to `~/.oracle/runs/<run_id>/` as JSON files
+5. **`oracle watch`** polls until completion; **`oracle result`** extracts the response
+
+Oracle uses [Playwright](https://playwright.dev/) for browser automation.
+
+## Personal Chrome Isolation
+
+Oracle always uses a separate Chrome profile at `~/.oracle/chrome` — your personal Chrome is never touched. When your personal Chrome is also running, Oracle takes extra care:
+
+- Skips app-level hiding to avoid accidentally hiding your personal Chrome windows
+- Oracle's Chrome window is parked offscreen instead
+- Set `ORACLE_FORCE_APP_HIDE=1` to force full hiding (may affect personal Chrome windows)
+
+## Login & Recovery
+
+If ChatGPT requires login or hits a Cloudflare challenge, the run enters a `needs_user` state. To resolve:
+
+```bash
+# Open a visible browser to log in
+oracle open
+
+# Then resume the run
+oracle resume <run_id>
+```
+
+If Chrome is stuck:
+
+```bash
+oracle resume <run_id> --allow-kill
+```
+
+## Configuration
+
+| Environment Variable | Description |
+|---------------------|-------------|
+| `ORACLE_BASE_URL` | Override ChatGPT URL |
+| `ORACLE_DEV` | Enable dev mode (exposes `--timeout-ms`, `--browser`, etc.) |
+| `ORACLE_FORCE_APP_HIDE` | Force app-level Chrome hiding |
+| `ORACLE_FORCE_KILL` | Enable SIGKILL for stuck Chrome (use with `--allow-kill`) |
+| `ORACLE_CAPTURE_HTML` | Save debug HTML/PNG snapshots |
 
 ## Development
 
 ```bash
-npm run dev -- run --prompt "Hello"
+# Run from source
+npm run dev -- run "Hello"
+
+# Run tests
+npm test
+
+# Run agent evals (mock ChatGPT)
+npm run eval:agents
 ```
 
-## Testing
+See [docs/TESTING.md](docs/TESTING.md) for testing details.
 
-`npm test` runs automated extraction tests (JSON/XML/exact-string) using headless Chromium. For mock UI smoke testing, use `npm run test:mock`. For real UI validation, run against ChatGPT directly.
+## Acknowledgments
 
-Agent SDK evals (Codex + Claude; mock ChatGPT): `npm run eval:agents`.
+Inspired by [@steipete/oracle](https://github.com/steipete/oracle) by Peter Steinberger — an API-based Oracle CLI. This project takes a different approach: browser automation instead of API calls, designed specifically for agents that need ChatGPT Pro's extended thinking capabilities via the web interface.
 
-See `docs/TESTING.md` for selector sync and long-run validation.
+## License
+
+[MIT](LICENSE)

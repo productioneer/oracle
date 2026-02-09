@@ -1,9 +1,8 @@
 {
   "name": "oracle",
   "version": "0.1.0",
-  "private": true,
-  "description": "Browser-based tool for AI agents to query GPT via ChatGPT web interface.",
-  "license": "UNLICENSED",
+  "description": "Browser-based tool for AI agents to query ChatGPT via browser automation. macOS only.",
+  "license": "MIT",
   "type": "commonjs",
   "bin": {
     "oracle": "dist/cli.js"

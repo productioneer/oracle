@@ -1,6 +1,6 @@
-# Oracle Improvements Spec
+# Oracle Design Decisions
 
-Findings and decisions from testing session. For Codex implementation.
+Design decisions and patterns from the implementation process.
 
 > **Browser automation**: See [chatgpt-browser-interaction.md](./chatgpt-browser-interaction.md) for the canonical, up-to-date spec on ChatGPT browser interaction (selectors, phases, flows). That document supersedes the selector/navigation sections below for implementation purposes.
 >
