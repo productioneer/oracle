@@ -189,6 +189,10 @@ Oracle always uses a separate Chrome profile at `~/.oracle/chrome` — your pers
 - Oracle's Chrome window is parked offscreen instead
 - Set `ORACLE_FORCE_APP_HIDE=1` to force full hiding (may affect personal Chrome windows)
 
+## macOS Permissions
+
+Oracle uses AppleScript to manage Chrome windows. On first run, macOS may prompt you to grant your terminal (Terminal.app, iTerm2, etc.) **Accessibility** and **Automation** permissions in **System Settings > Privacy & Security**. Allow these — without them, Oracle can't hide the Chrome window or prevent focus stealing.
+
 ## Login & Recovery
 
 If ChatGPT requires login or hits a Cloudflare challenge, the run enters a `needs_user` state. To resolve:
