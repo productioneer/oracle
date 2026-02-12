@@ -119,6 +119,11 @@ No file edits except temp files for testing. Commands only. No chatgpt.com.`;
     child.kill('SIGTERM');
   }, agentTimeoutMs);
 
+  // Inactivity timeout: kill the CLI 15s after 'result' event (agent finished its response).
+  // Some scenarios cause the CLI to hang after completing work; this prevents full-timeout waits.
+  let resultTimeoutId = null;
+  const RESULT_IDLE_MS = 15_000;
+
   child.stdin.write(fullPrompt);
   child.stdin.end();
 
@@ -148,7 +153,17 @@ No file edits except temp files for testing. Commands only. No chatgpt.com.`;
         }
       }
     }
-    if (data.type === 'result' && data.usage) usage = data.usage;
+    if (data.type === 'result' && data.usage) {
+      usage = data.usage;
+      // Start inactivity timer — if CLI doesn't exit within RESULT_IDLE_MS, kill it
+      if (!resultTimeoutId) {
+        resultTimeoutId = setTimeout(() => {
+          if (!child.killed) {
+            child.kill('SIGTERM');
+          }
+        }, RESULT_IDLE_MS);
+      }
+    }
   };
 
   child.stdout.on('data', (chunk) => {
@@ -172,6 +187,7 @@ No file edits except temp files for testing. Commands only. No chatgpt.com.`;
   });
 
   clearTimeout(timeoutId);
+  if (resultTimeoutId) clearTimeout(resultTimeoutId);
   if (buffer.trim()) handleLine(buffer);
   const elapsedMs = Date.now() - startedAt;
 
@@ -197,7 +213,7 @@ No file edits except temp files for testing. Commands only. No chatgpt.com.`;
     time_to_first_command_ms: firstToolAt ? firstToolAt - startedAt : null,
     session_id: sessionId,
     nonce,
-    success: allPassed && exitCode === 0,
+    success: allPassed,
     validation,
     usage,
     command_count: toolUseCount,

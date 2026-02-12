@@ -60,7 +60,6 @@ const SELECTORS = {
   thinkingTriggerExtended: 'button[aria-label*="Extended thinking"]',
   thinkingTriggerStandard: 'button[aria-label*="Pro"]',
   thinkingMenuItem: '[role="menuitemradio"]',
-  sourcesHeader: '[data-testid="bar-search-sources-header"]',
   sidebarClose: '[data-testid="close-button"]',
   threadBottom: "#thread-bottom-container",
 };
@@ -921,18 +920,6 @@ async function readThinkingSections(page: Page): Promise<string> {
         // Extract body text, stripping the "Pro thinking" header and other UI chrome
         const bodyText = getBodyText(container, proThinking);
         if (bodyText) sections.push(bodyText);
-      }
-    }
-
-    const sourcesHeader = document.querySelector(
-      selectors.sourcesHeader,
-    ) as HTMLElement | null;
-    if (sourcesHeader) {
-      const container =
-        sourcesHeader.closest("section") ?? sourcesHeader.parentElement;
-      if (container) {
-        const bodyText = getBodyText(container, sourcesHeader);
-        if (bodyText) sections.push("Sources:\n" + bodyText);
       }
     }
 

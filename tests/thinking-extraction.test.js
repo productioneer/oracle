@@ -83,9 +83,9 @@ test("extracts thinking content via fallback sections", async () => {
   await page.close();
   // Should extract the body text, not the "Pro thinking" header
   assert.match(content, /alpha line/i);
-  // Sources section should be labeled and included
-  assert.match(content, /sources/i);
-  assert.match(content, /example\.com/i);
+  // Sources section should NOT be included — it's not thinking content
+  assert.doesNotMatch(content, /sources/i);
+  assert.doesNotMatch(content, /example\.com/i);
 });
 
 test("strips Pro thinking prefix from body text", async () => {

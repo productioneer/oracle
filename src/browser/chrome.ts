@@ -111,13 +111,15 @@ export async function createHiddenPage(
   } = {},
 ): Promise<Page> {
   const context = browser.contexts()[0] ?? (await browser.newContext());
+  // Only reuse HTTPS pages (real ChatGPT sessions with active login state).
+  // Never reuse local/data pages — they may belong to other concurrent workers.
   let page: Page | null =
-    context.pages().find((candidate) => candidate.url().startsWith("https://")) ??
-    context.pages()[0] ??
-    null;
-  if (page && page.isClosed()) {
-    page = null;
-  }
+    context
+      .pages()
+      .find(
+        (candidate) =>
+          !candidate.isClosed() && candidate.url().startsWith("https://"),
+      ) ?? null;
   if (!page) {
     page = await context.newPage();
     const url = `data:text/html,oracle-${token}`;

@@ -15,6 +15,22 @@ const conversations = new Map();
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
 
+  // API endpoint: store conversation state from client-side JS
+  if (url.pathname.startsWith("/api/conversation/") && req.method === "POST") {
+    const convId = url.pathname.slice("/api/conversation/".length);
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      try {
+        const data = JSON.parse(body);
+        conversations.set(convId, data);
+      } catch { /* ignore parse errors */ }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("{}");
+    });
+    return;
+  }
+
   // Accept root, /c/* (conversation URLs), and /?scenario=* paths
   if (url.pathname !== "/" && !url.pathname.startsWith("/c/")) {
     res.writeHead(404);
@@ -27,12 +43,13 @@ const server = http.createServer((req, res) => {
     ? url.pathname.slice(3).split("?")[0]
     : null;
 
-  // Load existing conversation messages for follow-up rendering
-  const existingMessages = conversationId
-    ? conversations.get(conversationId) || []
-    : [];
+  // Load existing conversation state for follow-up rendering
+  const convState = conversationId
+    ? conversations.get(conversationId) || null
+    : null;
+  const existingMessages = convState?.messages || [];
 
-  const html = buildHtml(url.searchParams, existingMessages, conversationId);
+  const html = buildHtml(url.searchParams, existingMessages, conversationId, convState);
   res.writeHead(200, { "Content-Type": "text/html" });
   res.end(html);
   if (once) {
@@ -45,7 +62,7 @@ server.listen(port, "127.0.0.1", () => {
   console.log(`Mock ChatGPT listening on http://127.0.0.1:${port}`);
 });
 
-function buildHtml(params, existingMessages, conversationId) {
+function buildHtml(params, existingMessages, conversationId, convState) {
   // Scenario-based behavior via query params:
   //   ?scenario=fail          — response generation fails (no copy button)
   //   ?scenario=stall         — response stalls forever (stop button stays)
@@ -150,14 +167,10 @@ function buildHtml(params, existingMessages, conversationId) {
     <div class="thinking" id="thinking-panel">
       <div id="thought-header" class="thinking-header">Thought for 12 seconds</div>
       <button data-testid="close-button" id="thinking-close" style="float:right;font-size:12px;">Close</button>
-      <div id="thinking-content" class="thinking-content collapsed">
+      <div id="thinking-content" class="thinking-content${convState?.thinkingBody ? '' : ' collapsed'}">
         <section id="pro-thinking-section">
           <div id="pro-thinking-header">Pro thinking</div>
-          <div id="pro-thinking-body"></div>
-        </section>
-        <section id="sources-section">
-          <div data-testid="bar-search-sources-header" id="sources-header">Sources</div>
-          <div id="sources-body">example.com</div>
+          <div id="pro-thinking-body">${convState?.thinkingBody ? escapeHtml(convState.thinkingBody) : ''}</div>
         </section>
       </div>
     </div>
@@ -306,6 +319,9 @@ function buildHtml(params, existingMessages, conversationId) {
       const durationMs = Number(pageParams.get('durationMs') || 0);
       const delayMsParam = Number(pageParams.get('delayMs') || 50);
 
+      // Expand thinking panel (simulates ChatGPT auto-opening the sidebar)
+      thinkingContent.classList.remove('collapsed');
+
       // Scenario: stall — never complete
       if (scenario === 'stall') {
         const { article } = appendMessage('assistant', '');
@@ -398,8 +414,26 @@ function buildHtml(params, existingMessages, conversationId) {
           copyBtn.textContent = 'Copy';
           turnActions.appendChild(copyBtn);
           container.appendChild(turnActions);
+
+          // Persist conversation state so page reloads show the same content
+          saveConversation(prompt, response);
         }
       }, delay);
+    }
+
+    function saveConversation(prompt, response) {
+      const convMatch = window.location.pathname.match(/^\\/c\\/(.+)/);
+      if (!convMatch) return;
+      const convId = convMatch[1];
+      const msgs = [];
+      document.querySelectorAll('[data-message-author-role]').forEach(el => {
+        msgs.push({ role: el.getAttribute('data-message-author-role'), text: el.querySelector('article')?.innerText || '' });
+      });
+      fetch('/api/conversation/' + convId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: msgs, thinkingBody: proThinkingBody.innerText || '' })
+      }).catch(() => {});
     }
   </script>
 </body>
