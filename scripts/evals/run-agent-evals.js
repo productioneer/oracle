@@ -32,7 +32,18 @@ function runCommand(command, args, env) {
 async function main() {
   const port = Number(process.env.ORACLE_EVAL_PORT || 7777);
   const baseUrl = `http://127.0.0.1:${port}/`;
-  const env = { ...process.env, ORACLE_EVAL_BASE_URL: baseUrl, ORACLE_BASE_URL: baseUrl };
+  const env = {
+    PATH: process.env.PATH || '',
+    HOME: process.env.HOME || '',
+    TMPDIR: process.env.TMPDIR || '',
+    ORACLE_EVAL_BASE_URL: baseUrl,
+    ORACLE_BASE_URL: baseUrl,
+    ORACLE_EVAL_PORT: String(port),
+    ORACLE_EVAL_TIMEOUT_MS: process.env.ORACLE_EVAL_TIMEOUT_MS || '120000',
+    ORACLE_EVAL_SKIP_CODEX: process.env.ORACLE_EVAL_SKIP_CODEX || '',
+    ORACLE_EVAL_SKIP_CLAUDE: process.env.ORACLE_EVAL_SKIP_CLAUDE || '',
+    CLAUDE_MODEL: process.env.CLAUDE_MODEL || '',
+  };
   const mockServer = spawn(process.execPath, [path.join(__dirname, '..', 'mock-server.js'), '--port', String(port)], {
     stdio: ['ignore', 'pipe', 'inherit'],
     env,
