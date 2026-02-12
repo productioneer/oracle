@@ -44,7 +44,7 @@ export const DEFAULT_BASE_URL = "https://chatgpt.com/";
 
 const SELECTORS = {
   promptInputPrimary: "#prompt-textarea",
-  promptInputSecondary: ".ProseMirror, [contenteditable=\"true\"]",
+  promptInputSecondary: '.ProseMirror, [contenteditable="true"]',
   sendButtonPrimary: 'button[data-testid="send-button"]',
   sendButtonSecondary: 'button[aria-label*="Send"]',
   copyButtonPrimary: '[data-testid="copy-turn-action-button"]',
@@ -131,9 +131,14 @@ export async function ensureChatGptReady(
     logger,
     { timeoutMs: 15_000 },
   );
-  const hasNewChat = await selectorExists(page, SELECTOR_PAIRS.newChat, logger, {
-    timeoutMs: 15_000,
-  });
+  const hasNewChat = await selectorExists(
+    page,
+    SELECTOR_PAIRS.newChat,
+    logger,
+    {
+      timeoutMs: 15_000,
+    },
+  );
 
   if (hasModelSwitcher && hasNewChat) {
     logDebug(logger, "preflight ok (model switcher + new chat present)");
@@ -165,10 +170,15 @@ export async function waitForPromptInput(
   timeoutMs = 30_000,
   logger?: (message: string) => void,
 ): Promise<void> {
-  const selector = await waitForSelectorPair(page, SELECTOR_PAIRS.promptInput, logger, {
-    timeoutMs,
-    state: "attached",
-  });
+  const selector = await waitForSelectorPair(
+    page,
+    SELECTOR_PAIRS.promptInput,
+    logger,
+    {
+      timeoutMs,
+      state: "attached",
+    },
+  );
   logDebug(logger, `prompt input selector resolved: ${selector}`);
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -211,7 +221,9 @@ export async function ensureModelSelected(
 ): Promise<void> {
   const headerText = await page
     .evaluate(() => {
-      const span = document.querySelector("#page-header span") as HTMLElement | null;
+      const span = document.querySelector(
+        "#page-header span",
+      ) as HTMLElement | null;
       return span?.innerText ?? "";
     })
     .catch(() => "");
@@ -244,7 +256,9 @@ export async function ensureModelSelected(
   await page.locator(SELECTORS.modelOptionPro).click();
   await page.waitForFunction(
     () => {
-      const span = document.querySelector("#page-header span") as HTMLElement | null;
+      const span = document.querySelector(
+        "#page-header span",
+      ) as HTMLElement | null;
       return (span?.innerText ?? "").includes("5.2 Pro");
     },
     undefined,
@@ -330,7 +344,11 @@ async function typeIntoEditor(page: Page, text: string): Promise<void> {
  * (which ProseMirror maps to "submit message"). Trailing newlines are trimmed.
  * Slower than paste but more reliable as a fallback.
  */
-async function typeIntoEditorKeyboard(page: Page, text: string, delay = 30): Promise<void> {
+async function typeIntoEditorKeyboard(
+  page: Page,
+  text: string,
+  delay = 30,
+): Promise<void> {
   const trimmed = text.replace(/\n+$/, "");
   const lines = trimmed.split("\n");
   for (let i = 0; i < lines.length; i += 1) {
@@ -351,10 +369,15 @@ export async function submitPrompt(
   await waitForPromptInput(page, 30_000, logger);
   const normalizedPrompt = prompt.replace(/\r\n/g, "\n");
   const preparedPrompt = normalizedPrompt.replace(/\t/g, "  ");
-  const selector = await waitForSelectorPair(page, SELECTOR_PAIRS.promptInput, logger, {
-    timeoutMs: 30_000,
-    state: "visible",
-  });
+  const selector = await waitForSelectorPair(
+    page,
+    SELECTOR_PAIRS.promptInput,
+    logger,
+    {
+      timeoutMs: 30_000,
+      state: "visible",
+    },
+  );
   const input = page.locator(selector);
 
   const clearInput = async () => {
@@ -376,7 +399,10 @@ export async function submitPrompt(
   let typedValue = "";
   let typedNormalized = "";
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    logDebug(logger, `typing prompt attempt ${attempt + 1}${attempt > 0 ? " (keyboard fallback)" : " (paste)"}`);
+    logDebug(
+      logger,
+      `typing prompt attempt ${attempt + 1}${attempt > 0 ? " (keyboard fallback)" : " (paste)"}`,
+    );
     await clearInput();
     await input.click();
     if (attempt === 0) {
@@ -409,7 +435,11 @@ export async function readPromptInputValue(
   page: Page,
   logger?: (message: string) => void,
 ): Promise<{ value: string; found: boolean }> {
-  const resolved = await resolveSelectorPair(page, SELECTOR_PAIRS.promptInput, logger);
+  const resolved = await resolveSelectorPair(
+    page,
+    SELECTOR_PAIRS.promptInput,
+    logger,
+  );
   if (!resolved.selector) {
     logDebug(logger, "prompt input selector not found for read");
     return { value: "", found: false };
@@ -433,7 +463,11 @@ export async function getSendButtonState(
   page: Page,
   logger?: (message: string) => void,
 ): Promise<{ found: boolean; enabled: boolean }> {
-  const resolved = await resolveSelectorPair(page, SELECTOR_PAIRS.sendButton, logger);
+  const resolved = await resolveSelectorPair(
+    page,
+    SELECTOR_PAIRS.sendButton,
+    logger,
+  );
   if (!resolved.selector) {
     logDebug(logger, "send button selector not found");
     return { found: false, enabled: false };
@@ -504,8 +538,10 @@ export async function waitForUserMessage(
       }) => {
         const container = document.querySelector(selector);
         if (container) {
-          const user = container.querySelector(userSelector) as HTMLElement | null;
-          const text = user ? (user.innerText || "") : "";
+          const user = container.querySelector(
+            userSelector,
+          ) as HTMLElement | null;
+          const text = user ? user.innerText || "" : "";
           const normalized = normalizeText(text);
           const matches = expectedList.some((expected) => {
             if (!expected) return false;
@@ -556,8 +592,12 @@ export async function waitForUserMessage(
         )
           .map((el) => el.getAttribute("data-testid") || "")
           .filter(Boolean);
-        const users = Array.from(document.querySelectorAll(userSelector)) as HTMLElement[];
-        const lastUser = users.length ? users[users.length - 1].innerText || "" : "";
+        const users = Array.from(
+          document.querySelectorAll(userSelector),
+        ) as HTMLElement[];
+        const lastUser = users.length
+          ? users[users.length - 1].innerText || ""
+          : "";
         return { turns, userCount: users.length, lastUserLen: lastUser.length };
       }, SELECTORS.userMessage)
       .catch(() => null);
@@ -601,7 +641,10 @@ export async function waitForThinkingPanel(
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const clicked = await clickLatestThoughtHeader(page);
-      logDebug(logger, `thinking header click attempt ${attempt + 1}: ${clicked}`);
+      logDebug(
+        logger,
+        `thinking header click attempt ${attempt + 1}: ${clicked}`,
+      );
       if (!clicked) break;
       await ensureWideViewport(page);
       await sleep(THINKING_PANEL_RETRY_WAIT_MS);
@@ -620,7 +663,9 @@ export async function waitForThinkingPanel(
 }
 
 async function ensureSidebarCloseButton(page: Page): Promise<void> {
-  await page.locator(SELECTORS.sidebarClose).waitFor({ state: "visible", timeout: 10_000 });
+  await page
+    .locator(SELECTORS.sidebarClose)
+    .waitFor({ state: "visible", timeout: 10_000 });
 }
 
 async function hasProThinking(page: Page): Promise<boolean> {
@@ -633,7 +678,9 @@ async function hasProThinking(page: Page): Promise<boolean> {
 
 async function clickLatestThoughtHeader(page: Page): Promise<boolean> {
   return page.evaluate(() => {
-    const elements = Array.from(document.querySelectorAll("div, span, button")) as HTMLElement[];
+    const elements = Array.from(
+      document.querySelectorAll("div, span, button"),
+    ) as HTMLElement[];
     const headers = elements.filter((el) => {
       const text = (el.textContent || "").trim();
       return /^thought for \d+/i.test(text) && text.length < 50;
@@ -647,11 +694,19 @@ async function clickLatestThoughtHeader(page: Page): Promise<boolean> {
   });
 }
 
-async function clickSendButton(page: Page, logger?: (message: string) => void): Promise<void> {
-  const selector = await waitForSelectorPair(page, SELECTOR_PAIRS.sendButton, logger, {
-    timeoutMs: 15_000,
-    state: "visible",
-  });
+async function clickSendButton(
+  page: Page,
+  logger?: (message: string) => void,
+): Promise<void> {
+  const selector = await waitForSelectorPair(
+    page,
+    SELECTOR_PAIRS.sendButton,
+    logger,
+    {
+      timeoutMs: 15_000,
+      state: "visible",
+    },
+  );
   logDebug(logger, `send button selector resolved: ${selector}`);
   const button = page.locator(selector);
   const disabled = await button.evaluate((el) =>
@@ -736,7 +791,10 @@ export async function waitForCompletion(
     } else if (sawGenerating && generationEndedAt === null) {
       generationEndedAt = Date.now();
     }
-    if (snapshot.copyVisible !== lastCopyVisible || snapshot.generating !== lastGenerating) {
+    if (
+      snapshot.copyVisible !== lastCopyVisible ||
+      snapshot.generating !== lastGenerating
+    ) {
       logDebug(
         options.logger,
         `response state (copyVisible=${snapshot.copyVisible}, generating=${snapshot.generating})`,
@@ -804,7 +862,9 @@ export async function waitForCompletion(
     };
   }
   if (snapshot.generating) {
-    throw new ResponseStalledError("Response stalled with stop/update button visible");
+    throw new ResponseStalledError(
+      "Response stalled with stop/update button visible",
+    );
   }
   if (sawGenerating) {
     throw new ResponseFailedError("Response failed or canceled");
@@ -855,24 +915,33 @@ async function readThinkingSections(page: Page): Promise<string> {
 
     const proThinking = findProThinking();
     if (proThinking) {
-      const container = proThinking.closest("section") ?? proThinking.parentElement;
-      const text =
-        container?.innerText?.trim() || proThinking.innerText?.trim() || "";
-      if (text) sections.push(text);
+      const container =
+        proThinking.closest("section") ?? proThinking.parentElement;
+      if (container) {
+        // Extract body text, stripping the "Pro thinking" header and other UI chrome
+        const bodyText = getBodyText(container, proThinking);
+        if (bodyText) sections.push(bodyText);
+      }
     }
 
-    const sourcesHeader = document.querySelector(selectors.sourcesHeader) as HTMLElement | null;
+    const sourcesHeader = document.querySelector(
+      selectors.sourcesHeader,
+    ) as HTMLElement | null;
     if (sourcesHeader) {
-      const container = sourcesHeader.closest("section") ?? sourcesHeader.parentElement;
-      const text =
-        container?.innerText?.trim() || sourcesHeader.innerText?.trim() || "";
-      if (text) sections.push(text);
+      const container =
+        sourcesHeader.closest("section") ?? sourcesHeader.parentElement;
+      if (container) {
+        const bodyText = getBodyText(container, sourcesHeader);
+        if (bodyText) sections.push("Sources:\n" + bodyText);
+      }
     }
 
     return sections.join("\n\n").trim();
 
     function findProThinking(): HTMLElement | null {
-      const elements = Array.from(document.querySelectorAll("div, span, p")) as HTMLElement[];
+      const elements = Array.from(
+        document.querySelectorAll("div, span, p"),
+      ) as HTMLElement[];
       return (
         elements.find((el) => {
           const text = (el.textContent || "").trim();
@@ -882,6 +951,30 @@ async function readThinkingSections(page: Page): Promise<string> {
           return false;
         }) ?? null
       );
+    }
+
+    /** Extract text from a container, excluding the header element and known UI chrome. */
+    function getBodyText(
+      container: HTMLElement,
+      headerEl: HTMLElement,
+    ): string {
+      const children = Array.from(container.children) as HTMLElement[];
+      const bodyParts: string[] = [];
+      for (const child of children) {
+        if (child === headerEl) continue;
+        // Skip known UI chrome elements
+        const tag = child.tagName?.toLowerCase();
+        if (tag === "button") continue;
+        const text = child.innerText?.trim();
+        if (!text) continue;
+        // Strip leading "Pro thinking" prefix that some pages add to body text
+        const cleaned = text.replace(/^Pro thinking\n?/i, "").trim();
+        if (cleaned) bodyParts.push(cleaned);
+      }
+      if (bodyParts.length > 0) return bodyParts.join("\n");
+      // Fallback: use container text with header stripped
+      const full = container.innerText?.trim() || "";
+      return full.replace(/^Pro thinking\n?/i, "").trim();
     }
   }, SELECTORS);
 }
@@ -920,7 +1013,9 @@ async function scrollLatestAssistantIntoView(
         last.scrollIntoView({ block: "end", behavior: "auto" });
         return { scrolled: "assistant", count: nodes.length };
       }
-      const anchor = document.querySelector(selectors.threadBottom) as HTMLElement | null;
+      const anchor = document.querySelector(
+        selectors.threadBottom,
+      ) as HTMLElement | null;
       if (anchor) {
         anchor.scrollIntoView({ block: "end", behavior: "auto" });
         return { scrolled: "thread-bottom", count: 0 };
@@ -956,7 +1051,9 @@ async function getCompletionSnapshot(
 }> {
   const snapshot = await page.evaluate(
     ({ selectors, expectedTurn }) => {
-      const buttons = Array.from(document.querySelectorAll("button")) as HTMLButtonElement[];
+      const buttons = Array.from(
+        document.querySelectorAll("button"),
+      ) as HTMLButtonElement[];
       const generating = buttons.some((button) => {
         if (!isVisible(button)) return false;
         const label =
@@ -989,9 +1086,13 @@ async function getCompletionSnapshot(
         for (let offset = 0; offset <= 3; offset++) {
           const turnNum = expectedTurn + offset;
           const turnSelector = `[data-testid="conversation-turn-${turnNum}"]`;
-          const turnEl = document.querySelector(turnSelector) as HTMLElement | null;
+          const turnEl = document.querySelector(
+            turnSelector,
+          ) as HTMLElement | null;
           if (!turnEl) continue;
-          const assistantEl = turnEl.querySelector(selectors.assistantMessage) as HTMLElement | null;
+          const assistantEl = turnEl.querySelector(
+            selectors.assistantMessage,
+          ) as HTMLElement | null;
           if (assistantEl) {
             expectedContainer = turnEl;
             expectedAssistant = assistantEl;
@@ -1005,23 +1106,29 @@ async function getCompletionSnapshot(
       const lastVisible = targetAssistant ? isVisible(targetAssistant) : false;
       const innerText = targetAssistant?.innerText ?? "";
       const targetTurn = targetAssistant
-        ? (targetAssistant.closest('[data-testid^="conversation-turn-"]') as HTMLElement | null)
+        ? (targetAssistant.closest(
+            '[data-testid^="conversation-turn-"]',
+          ) as HTMLElement | null)
         : null;
       const copyScope =
         typeof expectedTurn === "number" ? expectedContainer : targetTurn;
       const copyPrimary = copyScope
-        ? (Array.from(copyScope.querySelectorAll(selectors.copyButtonPrimary)) as HTMLElement[])
+        ? (Array.from(
+            copyScope.querySelectorAll(selectors.copyButtonPrimary),
+          ) as HTMLElement[])
         : [];
       const copySecondary = copyScope
-        ? (Array.from(copyScope.querySelectorAll(selectors.copyButtonSecondary)) as HTMLElement[])
+        ? (Array.from(
+            copyScope.querySelectorAll(selectors.copyButtonSecondary),
+          ) as HTMLElement[])
         : [];
       const copyElements = [...copyPrimary, ...copySecondary];
       const copyElement = copyElements[0] ?? null;
       const copyVisible = copyElement ? isVisible(copyElement) : false;
       const copyMismatch = Boolean(
         copyPrimary.length > 0 &&
-          copySecondary.length > 0 &&
-          copyPrimary[0] !== copySecondary[0],
+        copySecondary.length > 0 &&
+        copyPrimary[0] !== copySecondary[0],
       );
 
       return {
@@ -1031,7 +1138,9 @@ async function getCompletionSnapshot(
         copySecondaryFound: copySecondary.length > 0,
         generating,
         lastAssistantText: innerText,
-        lastAssistantIndex: targetAssistant ? nodes.indexOf(targetAssistant) : -1,
+        lastAssistantIndex: targetAssistant
+          ? nodes.indexOf(targetAssistant)
+          : -1,
         assistantCount: nodes.length,
         lastAssistantVisible: lastVisible,
         innerTextLength: innerText.length,
@@ -1074,7 +1183,9 @@ async function waitForSelectorPair(
   logger: ((message: string) => void) | undefined,
   options: { timeoutMs?: number; state?: "attached" | "visible" } = {},
 ): Promise<string> {
-  const combined = pair.secondary ? `${pair.primary}, ${pair.secondary}` : pair.primary;
+  const combined = pair.secondary
+    ? `${pair.primary}, ${pair.secondary}`
+    : pair.primary;
   logDebug(
     logger,
     `waitForSelectorPair ${pair.name} combined="${combined}" state=${options.state ?? "attached"}`,
@@ -1100,7 +1211,9 @@ async function selectorExists(
   logger?: (message: string) => void,
   options: { requireText?: string; timeoutMs?: number } = {},
 ): Promise<boolean> {
-  const combined = pair.secondary ? `${pair.primary}, ${pair.secondary}` : pair.primary;
+  const combined = pair.secondary
+    ? `${pair.primary}, ${pair.secondary}`
+    : pair.primary;
   if (options.timeoutMs) {
     try {
       await page.waitForSelector(combined, {
@@ -1173,13 +1286,7 @@ async function resolveSelectorPair(
   logger?: (message: string) => void,
 ): Promise<SelectorMatch> {
   const resolved = (await page.evaluate(
-    ({
-      primary,
-      secondary,
-    }: {
-      primary: string;
-      secondary: string | null;
-    }) => {
+    ({ primary, secondary }: { primary: string; secondary: string | null }) => {
       const primaryEls = Array.from(document.querySelectorAll(primary));
       const secondaryEls = secondary
         ? Array.from(document.querySelectorAll(secondary))

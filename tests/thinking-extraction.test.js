@@ -1,7 +1,7 @@
-const { test, before, after } = require('node:test');
-const assert = require('node:assert/strict');
-const { chromium } = require('playwright');
-const { getThinkingContent } = require('../dist/browser/chatgpt.js');
+const { test, before, after } = require("node:test");
+const assert = require("node:assert/strict");
+const { chromium } = require("playwright");
+const { getThinkingContent } = require("../dist/browser/chatgpt.js");
 
 let browser;
 
@@ -15,7 +15,7 @@ after(async () => {
   }
 });
 
-test('extracts thinking content from sidebar', async () => {
+test("extracts thinking content from sidebar", async () => {
   const page = await browser.newPage();
   await page.setContent(`<!doctype html>
   <html>
@@ -30,11 +30,10 @@ test('extracts thinking content from sidebar', async () => {
 
   const content = await getThinkingContent(page);
   await page.close();
-  assert.match(content, /pro thinking/i);
   assert.match(content, /sidebar thinking content/i);
 });
 
-test('clicks latest thinking header when multiple are present', async () => {
+test("clicks latest thinking header when multiple are present", async () => {
   const page = await browser.newPage();
   await page.setContent(`<!doctype html>
   <html>
@@ -63,7 +62,7 @@ test('clicks latest thinking header when multiple are present', async () => {
   assert.doesNotMatch(content, /first/i);
 });
 
-test('extracts thinking content via fallback sections', async () => {
+test("extracts thinking content via fallback sections", async () => {
   const page = await browser.newPage();
   await page.setContent(`<!doctype html>
   <html>
@@ -82,8 +81,47 @@ test('extracts thinking content via fallback sections', async () => {
 
   const content = await getThinkingContent(page);
   await page.close();
-  assert.match(content, /pro thinking/i);
+  // Should extract the body text, not the "Pro thinking" header
   assert.match(content, /alpha line/i);
+  // Sources section should be labeled and included
   assert.match(content, /sources/i);
   assert.match(content, /example\.com/i);
+});
+
+test("strips Pro thinking prefix from body text", async () => {
+  const page = await browser.newPage();
+  await page.setContent(`<!doctype html>
+  <html>
+    <body>
+      <section>
+        <div>Pro thinking</div>
+        <div>Pro thinking\nActual reasoning about the problem</div>
+      </section>
+    </body>
+  </html>`);
+
+  const content = await getThinkingContent(page);
+  await page.close();
+  assert.match(content, /actual reasoning/i);
+  // The "Pro thinking" prefix in the body should be stripped
+  assert.ok(!content.startsWith("Pro thinking"));
+});
+
+test("excludes Close button text from output", async () => {
+  const page = await browser.newPage();
+  await page.setContent(`<!doctype html>
+  <html>
+    <body>
+      <section>
+        <div>Pro thinking</div>
+        <button>Close</button>
+        <div>Deep analysis of the problem</div>
+      </section>
+    </body>
+  </html>`);
+
+  const content = await getThinkingContent(page);
+  await page.close();
+  assert.match(content, /deep analysis/i);
+  assert.doesNotMatch(content, /^close$/im);
 });

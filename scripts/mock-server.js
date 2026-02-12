@@ -383,7 +383,7 @@ function buildHtml(params, existingMessages, conversationId) {
         idx += 1;
         const chunk = response.slice(0, idx);
         article.innerText = chunk;
-        proThinkingBody.innerText = 'Pro thinking\\n' + chunk;
+        proThinkingBody.innerText = chunk;
         if (idx >= response.length) {
           clearInterval(timer);
           stop.style.display = 'none';
