@@ -75,7 +75,8 @@ const scenarios = [
     id: 'thinking-retrieval',
     name: 'Retrieve thinking output',
     mockUrl: '/?durationMs=500',
-    task: (nonce) => `Use oracle to run prompt "eval-thinking ${nonce}" with --json. Wait for completion. Get the thinking output (use "oracle thinking <run_id>"). Then get the result. Return JSON: {"run_id":"...","thinking":"...","result":"..."}.`,
+    agentTimeoutMs: 240000,
+    task: (nonce) => `Use oracle to run prompt "eval-thinking ${nonce}" with --json. Wait for completion. Get the thinking output (use "oracle thinking <run_id> --full" — it prints to stdout). Then get the result. Return JSON: {"run_id":"...","thinking":"...","result":"..."}.`,
     validate: (result, nonce) => {
       return {
         usedRun: result.commandLines.some(c => c.includes('oracle run')),

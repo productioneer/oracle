@@ -99,7 +99,7 @@ No file edits except temp files for testing. Commands only. No chatgpt.com.`;
   ];
   if (repoRoot) args.push('--add-dir', repoRoot);
 
-  const agentTimeoutMs = Number(process.env.ORACLE_EVAL_AGENT_TIMEOUT_MS || 180000);
+  const agentTimeoutMs = scenario.agentTimeoutMs || Number(process.env.ORACLE_EVAL_AGENT_TIMEOUT_MS || 180000);
   const startedAt = Date.now();
   let buffer = '';
   let rawOutput = '';
