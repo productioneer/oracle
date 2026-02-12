@@ -75,7 +75,7 @@ async function main() {
   });
 
   const args = [
-    '--model', process.env.CLAUDE_MODEL || 'sonnet',
+    '--model', process.env.CLAUDE_MODEL || 'opus',
     '-p',
     '--print',
     '--verbose',

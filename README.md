@@ -89,6 +89,8 @@ Oracle is designed to be used by AI agents. Copy the instructions below into you
 
 Query ChatGPT Pro via browser automation. Runs asynchronously — start a run, wait for completion, get the result.
 
+**Oracle runs remotely.** It has ONLY the information in your prompt and attached files — no access to your local filesystem, environment, or context. Include all necessary context in the prompt itself, and use `@file` references to attach relevant files.
+
 ### Standard Workflow (3 commands)
 
 ```bash

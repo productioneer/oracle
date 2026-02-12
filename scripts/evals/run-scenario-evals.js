@@ -9,7 +9,7 @@
  *   node run-scenario-evals.js [--scenario <id>] [--port <n>]
  *
  * Environment:
- *   CLAUDE_MODEL      — model to use (default: sonnet)
+ *   CLAUDE_MODEL      — model to use (default: opus)
  *   ORACLE_EVAL_AGENT_TIMEOUT_MS — per-scenario timeout (default: 180000)
  */
 
@@ -89,7 +89,7 @@ No file edits except temp files for testing. Commands only. No chatgpt.com.`;
   });
 
   const args = [
-    '--model', process.env.CLAUDE_MODEL || 'sonnet',
+    '--model', process.env.CLAUDE_MODEL || 'opus',
     '-p', '--print', '--verbose',
     '--output-format', 'stream-json',
     '--permission-mode', 'bypassPermissions',
