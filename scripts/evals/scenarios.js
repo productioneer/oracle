@@ -75,8 +75,8 @@ const scenarios = [
     id: 'thinking-retrieval',
     name: 'Retrieve thinking output',
     mockUrl: '/?durationMs=500',
-    agentTimeoutMs: 240000,
-    task: (nonce) => `Use oracle to run prompt "eval-thinking ${nonce}" with --json. Wait for completion. Get the thinking output (use "oracle thinking <run_id> --full" — it prints to stdout). Then get the result. Return JSON: {"run_id":"...","thinking":"...","result":"..."}.`,
+    agentTimeoutMs: 300000,
+    task: (nonce) => `Use oracle to run prompt "eval-thinking ${nonce}" with --json. Wait for completion. Get the thinking output with "oracle thinking <run_id> --full" (prints to stdout — the output may include UI text like "Close" and "Sources", that's expected). Then get the result. Return JSON: {"run_id":"...","thinking":"...","result":"..."}.`,
     validate: (result, nonce) => {
       return {
         usedRun: result.commandLines.some(c => c.includes('oracle run')),
@@ -355,6 +355,71 @@ Important: Start both runs before watching either one.`,
     maxCommands: 6,
     expectedMinCommands: 4,
     extraOpts: (tmpDir) => ({ promptFile: `${tmpDir}/eval-prompt.txt` }),
+  },
+
+  // --- Prompt File Not Found ---
+  {
+    id: 'error-prompt-file-not-found',
+    name: 'Handle missing --prompt-file gracefully',
+    mockUrl: '/?durationMs=500',
+    task: (nonce) => `Try running oracle with a non-existent prompt file: "oracle run --prompt-file /tmp/oracle-nope-${nonce}.txt --json". Observe the error. Then run a normal prompt "recovery ${nonce}" with --json, watch, and get the result. Return JSON: {"file_error":"...","recovery_run_id":"...","recovery_result":"..."}.`,
+    validate: (result, nonce) => {
+      return {
+        triedBadFile: result.commandLines.some(c =>
+          c.includes('oracle run') && c.includes('--prompt-file') && c.includes('nope')
+        ),
+        sawFileError: result.rawOutput.includes('PROMPT_FILE_NOT_FOUND') ||
+                      result.rawOutput.includes('not found') ||
+                      result.assistantText.includes('PROMPT_FILE_NOT_FOUND') ||
+                      result.assistantText.includes('not found'),
+        recoveredWithPrompt: result.commandLines.some(c =>
+          c.includes('oracle run') && c.includes('recovery')
+        ),
+      };
+    },
+    maxCommands: 8,
+    expectedMinCommands: 4,
+  },
+
+  // --- Result JSON Output ---
+  {
+    id: 'result-json-format',
+    name: 'Use oracle result --json for structured metadata',
+    mockUrl: '/?durationMs=500',
+    task: (nonce) => `Use oracle to run prompt "eval-resultjson ${nonce}" with --json. Watch for completion. Then get the result using "oracle result <run_id> --json" (note: --json flag on result). Return JSON: {"run_id":"...","result_json":<the parsed JSON object from oracle result --json>}.`,
+    validate: (result, nonce) => {
+      return {
+        usedRun: result.commandLines.some(c => c.includes('oracle run')),
+        usedWatch: result.commandLines.some(c => c.includes('oracle watch')),
+        usedResultJson: result.commandLines.some(c =>
+          c.includes('oracle result') && c.includes('--json')
+        ),
+        echoFound: result.rawOutput.includes(`eval-resultjson ${nonce}`) || result.assistantText.includes(`eval-resultjson ${nonce}`),
+      };
+    },
+    maxCommands: 4,
+    expectedMinCommands: 3,
+  },
+
+  // --- Slow Start ---
+  {
+    id: 'slow-start',
+    name: 'Handle slow page load with delayed prompt input',
+    mockUrl: '/?scenario=slow_start&durationMs=500',
+    agentTimeoutMs: 240000,
+    task: (nonce) => `Use oracle to run prompt "eval-slow ${nonce}" with --json. The mock server has a slow start (delayed page load). Watch for completion and get the result. Return JSON: {"run_id":"...","result":"..."}.`,
+    validate: (result, nonce) => {
+      const expected = `eval-slow ${nonce}`;
+      return {
+        usedRun: result.commandLines.some(c => c.includes('oracle run')),
+        usedWatch: result.commandLines.some(c => c.includes('oracle watch')),
+        usedResult: result.commandLines.some(c => c.includes('oracle result')),
+        echoFound: result.rawOutput.includes(expected) || result.assistantText.includes(expected),
+        efficientCommands: result.oracleCommandCount <= 4,
+      };
+    },
+    maxCommands: 4,
+    expectedMinCommands: 3,
   },
 ];
 
