@@ -2,7 +2,7 @@
 
 Query ChatGPT Pro via browser automation. Runs asynchronously — start a run, wait for completion, get the result.
 
-**Oracle runs remotely.** It has ONLY the information in your prompt and attached files — no access to your local filesystem, environment, or context. Include all necessary context in the prompt, and use `@file` references to attach relevant files.
+**Oracle is effectively a remote agent.** It has ONLY the information in your prompt and attached files — no repo access, no local filesystem, no knowledge of your project or conventions. Include all relevant context in the prompt and use `@file` references to attach files, but don't overshare irrelevant setup details.
 
 `ORACLE_EVAL_BASE_URL` is already set; do not override it. Mock server: no login needed.
 
