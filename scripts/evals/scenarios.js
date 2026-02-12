@@ -200,6 +200,161 @@ const scenarios = [
     maxCommands: 5,
     expectedMinCommands: 3,
   },
+
+  // --- Multiple File Attachments ---
+  {
+    id: 'multi-file-attachment',
+    name: 'Run with multiple @file references',
+    mockUrl: '/?durationMs=500',
+    task: (nonce, opts) => `Create three small temp files:
+- ${opts.tempFile1} with content "alpha data ${nonce}"
+- ${opts.tempFile2} with content "beta data ${nonce}"
+- ${opts.tempFile3} with content "gamma data ${nonce}"
+Then use oracle to run a prompt that references all three: "Analyze @${opts.tempFile1} @${opts.tempFile2} @${opts.tempFile3}" with --json. Wait for completion and get the result. Return JSON: {"run_id":"...","result":"..."}.`,
+    validate: (result) => {
+      return {
+        createdFiles: result.commandLines.filter(c =>
+          c.includes('echo') || c.includes('cat') || c.includes('printf') || c.includes('write') || c.includes('>')
+        ).length >= 1,
+        usedMultipleAtRefs: (() => {
+          const runCmd = result.commandLines.find(c => c.includes('oracle run'));
+          if (!runCmd) return false;
+          const atCount = (runCmd.match(/@/g) || []).length;
+          return atCount >= 3;
+        })(),
+        usedRun: result.commandLines.some(c => c.includes('oracle run')),
+        usedWatch: result.commandLines.some(c => c.includes('oracle watch')),
+        usedResult: result.commandLines.some(c => c.includes('oracle result')),
+      };
+    },
+    maxCommands: 8,
+    expectedMinCommands: 5,
+    extraOpts: (tmpDir) => ({
+      tempFile1: `${tmpDir}/eval-multi-1.txt`,
+      tempFile2: `${tmpDir}/eval-multi-2.txt`,
+      tempFile3: `${tmpDir}/eval-multi-3.txt`,
+    }),
+  },
+
+  // --- File Range Inline ---
+  {
+    id: 'file-range-inline',
+    name: 'Run with @file:N-M line range syntax',
+    mockUrl: '/?durationMs=500',
+    task: (nonce, opts) => `Create a temp file at ${opts.tempFile} with 20 lines of content (line 1: "line-1 ${nonce}", line 2: "line-2 ${nonce}", etc. up to line 20). Then use oracle to run a prompt that references lines 5-10 of that file: "Review @${opts.tempFile}:5-10" with --json. Wait for completion and get the result. Return JSON: {"run_id":"...","result":"..."}.`,
+    validate: (result, nonce) => {
+      return {
+        createdFile: result.commandLines.some(c =>
+          c.includes('echo') || c.includes('printf') || c.includes('>') || c.includes('write') || c.includes('for') || c.includes('seq')
+        ),
+        usedLineRange: result.commandLines.some(c =>
+          c.includes('oracle run') && c.match(/:5-10\b/)
+        ),
+        usedRun: result.commandLines.some(c => c.includes('oracle run')),
+        usedWatch: result.commandLines.some(c => c.includes('oracle watch')),
+        usedResult: result.commandLines.some(c => c.includes('oracle result')),
+      };
+    },
+    maxCommands: 6,
+    expectedMinCommands: 4,
+    extraOpts: (tmpDir) => ({ tempFile: `${tmpDir}/eval-range.txt` }),
+  },
+
+  // --- Invalid File Reference ---
+  {
+    id: 'error-invalid-file-ref',
+    name: 'Handle invalid @file reference gracefully',
+    mockUrl: '/?durationMs=500',
+    task: (nonce) => `Try to use oracle to run a prompt that references a non-existent file: "Analyze @/tmp/oracle-nonexistent-${nonce}.txt" with --json. Observe and report the error. Then run a proper prompt "recovery ${nonce}" with --json, watch it, and get the result. Return JSON: {"file_error":"...","recovery_run_id":"...","recovery_result":"..."}.`,
+    validate: (result, nonce) => {
+      return {
+        triedBadFile: result.commandLines.some(c =>
+          c.includes('oracle run') && c.includes('nonexistent')
+        ),
+        sawFileError: result.rawOutput.includes('not found') || result.rawOutput.includes('File not found') ||
+                      result.assistantText.includes('not found') || result.assistantText.includes('File not found'),
+        recoveredWithPrompt: result.commandLines.some(c =>
+          c.includes('oracle run') && c.includes('recovery')
+        ),
+        didNotRetryBadFile: result.commandLines.filter(c =>
+          c.includes('nonexistent')
+        ).length <= 2,
+      };
+    },
+    maxCommands: 8,
+    expectedMinCommands: 4,
+  },
+
+  // --- Concurrent Runs ---
+  {
+    id: 'concurrent-runs',
+    name: 'Start and manage two concurrent runs',
+    mockUrl: '/?durationMs=1000',
+    task: (nonce) => `Start TWO oracle runs concurrently:
+1. Run prompt "eval-concurrent-A ${nonce}" with --json
+2. Run prompt "eval-concurrent-B ${nonce}" with --json
+Then watch both runs and get both results. Return JSON: {"run_id_a":"...","run_id_b":"...","result_a":"...","result_b":"..."}.
+Important: Start both runs before watching either one.`,
+    validate: (result, nonce) => {
+      const runCommands = result.commandLines.filter(c => c.includes('oracle run'));
+      const watchCommands = result.commandLines.filter(c => c.includes('oracle watch'));
+      const resultCommands = result.commandLines.filter(c => c.includes('oracle result'));
+      return {
+        startedTwoRuns: runCommands.length >= 2,
+        watchedBoth: watchCommands.length >= 2,
+        gotBothResults: resultCommands.length >= 2,
+        echoFoundA: result.rawOutput.includes(`eval-concurrent-A ${nonce}`) || result.assistantText.includes('concurrent-A'),
+        echoFoundB: result.rawOutput.includes(`eval-concurrent-B ${nonce}`) || result.assistantText.includes('concurrent-B'),
+      };
+    },
+    maxCommands: 10,
+    expectedMinCommands: 6,
+  },
+
+  // --- Cancel Completed Run ---
+  {
+    id: 'error-cancel-completed',
+    name: 'Handle cancel on already-completed run',
+    mockUrl: '/?durationMs=300',
+    task: (nonce) => `Use oracle to run prompt "eval-cancel-done ${nonce}" with --json. Watch it to completion. Then try to cancel it (it should fail since it is already completed). Report the error. Return JSON: {"run_id":"...","result":"...","cancel_error":"..."}.`,
+    validate: (result) => {
+      return {
+        usedRun: result.commandLines.some(c => c.includes('oracle run')),
+        usedWatch: result.commandLines.some(c => c.includes('oracle watch')),
+        usedResult: result.commandLines.some(c => c.includes('oracle result')),
+        triedCancel: result.commandLines.some(c => c.includes('oracle cancel')),
+        sawTerminalError: result.rawOutput.includes('RUN_TERMINAL') || result.rawOutput.includes('already') ||
+                          result.assistantText.includes('RUN_TERMINAL') || result.assistantText.includes('already completed'),
+      };
+    },
+    maxCommands: 6,
+    expectedMinCommands: 4,
+  },
+
+  // --- Prompt File Option ---
+  {
+    id: 'prompt-file',
+    name: 'Run with --prompt-file option',
+    mockUrl: '/?durationMs=500',
+    task: (nonce, opts) => `Create a temp file at ${opts.promptFile} containing the text "eval-promptfile ${nonce}". Then use oracle with the --prompt-file flag to start a run: "oracle run --prompt-file ${opts.promptFile} --json". Watch it and get the result. Return JSON: {"run_id":"...","result":"..."}.`,
+    validate: (result, nonce) => {
+      const expected = `eval-promptfile ${nonce}`;
+      return {
+        createdPromptFile: result.commandLines.some(c =>
+          c.includes('echo') || c.includes('printf') || c.includes('>') || c.includes('write')
+        ),
+        usedPromptFile: result.commandLines.some(c =>
+          c.includes('oracle run') && c.includes('--prompt-file')
+        ),
+        usedWatch: result.commandLines.some(c => c.includes('oracle watch')),
+        usedResult: result.commandLines.some(c => c.includes('oracle result')),
+        echoFound: result.rawOutput.includes(expected) || result.assistantText.includes(expected),
+      };
+    },
+    maxCommands: 6,
+    expectedMinCommands: 4,
+    extraOpts: (tmpDir) => ({ promptFile: `${tmpDir}/eval-prompt.txt` }),
+  },
 ];
 
 module.exports = { scenarios };
